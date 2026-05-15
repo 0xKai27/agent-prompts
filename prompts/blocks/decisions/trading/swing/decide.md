@@ -1,8 +1,8 @@
-{/* blocks/decisions/trading/swing/decide.md — v1.6.0 */}
+{/* blocks/decisions/trading/swing/decide.md — v1.0.0 */}
 
 # block: decisions/trading/swing/decide
 
-**Responsibility:** Pure routing — read market signals from `{{stage.scan_trading_signals}}` and vault position state from `{{stage.scan_position_trading}}`, evaluate exit rules independently for every open lot and entry conditions in parallel, and write a structured decision signal to cycle state for downstream execute blocks. Read-only queries (`compute_token_amount`, `simulate_exit`, `simulate_enter`) permitted. No execution. No signing.
+**Responsibility:** Pure routing — read market signals from `{{stage.scan_trading_signals}}` and vault position state from `{{stage.scan_position_trading}}`, evaluate exit rules independently for every open position and entry conditions in parallel, and write a structured decision signal to cycle state for downstream execute blocks. Read-only queries (`compute_token_amount`, `simulate_exit`, `simulate_enter`) permitted. No execution. No signing.
 
 ---
 
@@ -14,20 +14,18 @@
 | `current.rsi_1h` | `{{stage.scan_trading_signals}}` | number | RSI on 1H bar |
 | `current.rsi_4h` | `{{stage.scan_trading_signals}}` | number | RSI on 4H bar |
 | `current.regime` | `{{stage.scan_trading_signals}}` | string | Market regime |
-| `current.vol_ratio` | `{{stage.scan_trading_signals}}` | number | Volume ratio vs rolling average |
+| `current.vol_ratio` | `{{stage.scan_trading_signals}}` | number \| null | Volume ratio vs rolling average — null on Binance fallback |
 | `previous_cycle.rsi_1h` | `{{stage.scan_trading_signals}}` | number \| null | Prior-cycle RSI 1H — null on first cycle |
-| `usdc_bal` | `{{stage.scan_position_trading}}` | number | Idle USDC in vault |
+| `current.atr_pct` | `{{stage.scan_trading_signals}}` | number \| null | 4H ATR as % of price — forwarded to execute for stop loss. Null on Binance fallback. |
 | `credit_usd` | `{{stage.scan_position_trading}}` | number | USDC deposited in Aave |
-| `positions` | `{{stage.scan_position_trading}}` | array | Held trading token balances (empty = fully in cash) |
-| `open_positions` | `{{stage.scan_position_trading}}` | array | Open lots with per-lot exit plan metadata (see schema below) |
-| `total_vault_usd` | `{{stage.scan_position_trading}}` | number | Total vault USD value |
+| `open_positions` | `{{stage.scan_position_trading}}` | array | Open positions with per-position exit plan metadata (see schema below) |
 | `buy_cooldown_active` | `{{stage.scan_position_trading}}` | boolean | True if within 120 min of last buy |
 
-**`open_positions[]` lot schema** (written by execute block, surfaced by `scan_position_trading`):
+**`open_positions[]` position schema** (written by execute block, surfaced by `scan_position_trading`):
 
 ```
 {
-  "lot_index":        <number>,      // stable identifier — used in exits[] output
+  "position_index":   <number>,      // stable identifier — used in exits[] output
   "cost_basis_usd":   <number>,      // copy literally into simulate_exit — do not recompute
   "scalp_target_usd": <number>,      // price threshold — compare directly against current.price
   "tp_target_usd":    <number>,      // price threshold — compare directly against current.price
@@ -48,7 +46,7 @@ If either upstream stage is absent or contains an `error` key → write the erro
 
 1. **No `sign_and_send` and no write tools.** `compute_token_amount`, `simulate_exit`, and `simulate_enter` are read-only queries — permitted. All mutations are forbidden.
 
-2. **Exit and entry evaluations run independently every cycle.** Open lots do not block entry evaluation. Exposure is enforced by `compute_token_amount` (via `exposureTokenAddress` + `maxExposurePct`), not by routing logic.
+2. **Exit and entry evaluations both run every cycle.** Entry is blocked when any open position exists — this strategy holds one position maximum. Exposure is additionally enforced by `compute_token_amount` (via `exposureTokenAddress` + `maxExposurePct`) as a secondary backstop.
 
 3. **`simulate_exit` mandatory before every SELL except Rule 1 stop loss.** Stop loss bypasses simulation — the SELL GUARD handles it at the swap layer. Gating on `simulate_exit` risks `BLOCKED_LOSS` trapping the position past the stop.
 
@@ -62,13 +60,13 @@ If either upstream stage is absent or contains an `error` key → write the erro
 
 ---
 
-## ⚠️ AMBITIOUS PROFILE THRESHOLDS — READ LITERALLY, DO NOT CHANGE
+## ⚠️ Ambitious profile thresholds — read literally, do not change
 
 - **Entry regime**: `regime ∈ {bull, normal}`
 - **Entry signal**: `previous_cycle.rsi_1h < 48` AND `current.rsi_1h ≥ 48`
-- **Entry guards**: `current.rsi_4h > 45` AND `current.vol_ratio ≥ 0.8`
-- **Exit — stop**: `current.price ≤ lot.stop_loss_usd`
-- **Exit — regime fire**: `lot.entry_regime = bull` AND `current.regime ∈ {normal, caution, bear}` — OR — `lot.entry_regime = normal` AND `current.regime ∈ {caution, bear}`
+- **Entry guards**: `current.rsi_4h > 45` AND `current.vol_ratio` is not null AND `current.vol_ratio ≥ 0.8`
+- **Exit — stop**: `current.price ≤ position.stop_loss_usd`
+- **Exit — regime fire**: `position.entry_regime = bull` AND `current.regime ∈ {normal, caution, bear}` — OR — `position.entry_regime = normal` AND `current.regime ∈ {caution, bear}`
 - **Entry size**: 55% of `buying_power_usd` | `maxExposurePct: 85`
 - **BUY cooldown**: 2 hours, enforced via `buy_cooldown_active`
 
@@ -93,80 +91,83 @@ compute_token_amount(vault=<vault>,
 
 ---
 
-## Step 2 — EXIT evaluation (per lot)
+## Step 2 — EXIT evaluation (per position)
 
-Evaluate Rules 1–4 independently for each lot in `open_positions[]` using that lot's own fields. Stop at the first rule that fires per lot. Collect all results into `exits[]`.
+Evaluate Rules 1–4 independently for each position in `open_positions[]` using that position's own fields. Stop at the first rule that fires per position. Collect all results into `exits[]`.
 
 If `open_positions[]` is empty → `exits = []`. Proceed to Step 3.
 
 ---
 
 **Rule 1 — Stop loss**
-`current.price ≤ lot.stop_loss_usd`?
-→ YES: append `{ lot_index: <n>, decision: "SELL", sell_pct: 100, exit_reason: "stop_loss" }`. Next lot.
+If `position.stop_loss_usd` is null → skip this rule, proceed to Rule 2.
+`current.price ≤ position.stop_loss_usd`?
+→ YES: append `{ position_index: <n>, decision: "SELL", sell_pct: 100, exit_reason: "stop_loss" }`. Next position.
   Do NOT call `simulate_exit`.
 → NO: Rule 2.
 
 ---
 
 **Rule 2 — Regime downgrade**
-Look up `lot.entry_regime` in the table below and check if `current.regime` appears in the fire set:
+Look up `position.entry_regime` in the table below and check if `current.regime` appears in the fire set:
 
-| `lot.entry_regime` | Fire exit when `current.regime` is |
+| `position.entry_regime` | Fire exit when `current.regime` is |
 |---|---|
 | `bull`   | `normal`, `caution`, or `bear` |
 | `normal` | `caution` or `bear` |
 
-If `lot.entry_regime` is null or absent → skip this rule, proceed to Rule 3.
+If `position.entry_regime` is null or absent → skip this rule, proceed to Rule 3.
 
 → FIRE:
 ```
-simulate_exit(percentage:100, costBasisUsd:<lot.cost_basis_usd — copy literally, do not recompute>, targetPnlPct:0)
+simulate_exit(percentage:100, costBasisUsd:<position.cost_basis_usd — copy literally, do not recompute>, targetPnlPct:0)
 ```
-- `SELL_CONFIRMED`: append `{ lot_index: <n>, decision: "SELL", sell_pct: 100, exit_reason: "regime_drop" }`. Next lot.
-- `BLOCKED_LOSS`: append `{ lot_index: <n>, decision: "HOLD", sell_pct: null, exit_reason: null }`. Next lot.
+- `SELL_CONFIRMED`: append `{ position_index: <n>, decision: "SELL", sell_pct: 100, exit_reason: "regime_drop" }`. Next position.
+- `BLOCKED_LOSS`: append `{ position_index: <n>, decision: "HOLD", sell_pct: null, exit_reason: null }`. Next position.
   Do not sell at a loss via this rule — wait for stop or TP.
 → NO MATCH: Rule 3.
 
 ---
 
 **Rule 3 — Take profit**
-`current.price ≥ lot.tp_target_usd`?
+`current.price ≥ position.tp_target_usd`?
 → YES:
 ```
 simulate_exit(percentage:100,
-  costBasisUsd:<lot.cost_basis_usd — copy literally, do not recompute>,
-  targetPnlPct:<lot.tp_net_pct — copy literally>)
+  costBasisUsd:<position.cost_basis_usd — copy literally, do not recompute>,
+  targetPnlPct:<position.tp_net_pct — copy literally>)
 ```
-- `SELL_CONFIRMED`: append `{ lot_index: <n>, decision: "SELL", sell_pct: 100, exit_reason: "take_profit" }`. Next lot.
-- `BELOW_TARGET` or `BLOCKED_LOSS`: append `{ lot_index: <n>, decision: "HOLD", sell_pct: null, exit_reason: null }`. Next lot.
+- `SELL_CONFIRMED`: append `{ position_index: <n>, decision: "SELL", sell_pct: 100, exit_reason: "take_profit" }`. Next position.
+- `BELOW_TARGET` or `BLOCKED_LOSS`: append `{ position_index: <n>, decision: "HOLD", sell_pct: null, exit_reason: null }`. Next position.
 → NO: Rule 4.
 
 ---
 
 **Rule 4 — Scalp**
-`current.price ≥ lot.scalp_target_usd`?
+`current.price ≥ position.scalp_target_usd`?
 → YES: determine `sell_pct` and `costBasisUsd` from this table — copy both literally, no arithmetic:
 
-| `lot.trade_count` | `sell_pct` | `costBasisUsd` for `simulate_exit` |
+| `position.trade_count` | `sell_pct` | `costBasisUsd` for `simulate_exit` |
 |---|---|---|
-| `1` | `50` | `lot.scalp_cost_basis_usd` |
-| `2` or more | `100` | `lot.cost_basis_usd` |
+| `1` | `50` | `position.scalp_cost_basis_usd` |
+| `2` or more | `100` | `position.cost_basis_usd` |
 
 ```
 simulate_exit(percentage:<sell_pct from table above>,
   costBasisUsd:<costBasisUsd from table above — copy literally>,
-  targetPnlPct:<lot.scalp_net_pct — copy literally>)
+  targetPnlPct:<position.scalp_net_pct — copy literally>)
 ```
-- `SELL_CONFIRMED`: append `{ lot_index: <n>, decision: "SELL", sell_pct: <sell_pct>, exit_reason: "scalp" }`. Next lot.
-- `BELOW_TARGET` or `BLOCKED_LOSS`: append `{ lot_index: <n>, decision: "HOLD", sell_pct: null, exit_reason: null }`. Next lot.
-→ NO: append `{ lot_index: <n>, decision: "HOLD", sell_pct: null, exit_reason: null }`. Next lot.
+- `SELL_CONFIRMED`: append `{ position_index: <n>, decision: "SELL", sell_pct: <sell_pct>, exit_reason: "scalp" }`. Next position.
+- `BELOW_TARGET` or `BLOCKED_LOSS`: append `{ position_index: <n>, decision: "HOLD", sell_pct: null, exit_reason: null }`. Next position.
+→ NO: append `{ position_index: <n>, decision: "HOLD", sell_pct: null, exit_reason: null }`. Next position.
 
 ---
 
 ## Step 3 — ENTRY evaluation
 
 **Exposure cap** (from Step 1): `entry_amount = null` → `entry = { decision: "HOLD", needs_withdraw: false, buying_power_usd: 0, entry_regime: null }`. Proceed to Step 4.
+
+**Open position guard**: `open_positions[]` non-empty → `entry = { decision: "HOLD", needs_withdraw: false, buying_power_usd: <buying_power_usd>, entry_regime: null }`. Proceed to Step 4.
 
 **Cooldown**: `buy_cooldown_active = true` → `entry = { decision: "HOLD", needs_withdraw: false, buying_power_usd: <buying_power_usd>, entry_regime: null }`. Proceed to Step 4.
 
@@ -176,7 +177,7 @@ simulate_exit(percentage:<sell_pct from table above>,
 1. `current.regime ∈ {bull, normal}`
 2. `previous_cycle.rsi_1h < 48` AND `current.rsi_1h ≥ 48`
 3. `current.rsi_4h > 45`
-4. `current.vol_ratio ≥ 0.8`
+4. `current.vol_ratio` is not null AND `current.vol_ratio ≥ 0.8`
 
 Any condition false → `entry = { decision: "HOLD", needs_withdraw: false, buying_power_usd: <buying_power_usd>, entry_regime: null }`. Proceed to Step 4.
 
@@ -198,48 +199,44 @@ Proceed to Step 4.
 
 ---
 
-## Step 4 — Write cycle state
+## Step 4 — Emit output
+
+First emit the human-readable decision summary:
 
 ```
-write_cycle_state(vaultAddress=<vault>, state={
+DECIDE regime: <current.regime> | rsi_1h: <previous_cycle.rsi_1h>→<current.rsi_1h> | buying_power: $<buying_power_usd>
+ENTRY → <BUY | HOLD> [BUY] entry_regime: <entry_regime> | needs_withdraw: <true/false> [HOLD] <one-sentence reason>
+EXITS (<n> positions evaluated) [position <n>] <SELL exit_reason sell_pct% | HOLD reason> ...
+```
+
+Then emit the following JSON object as the **absolute last line** of your output. No prose after it.
+
+```json
+{
   "entry": {
     "decision":         "<BUY | HOLD>",
     "needs_withdraw":   <true | false>,
     "buying_power_usd": <number>,
-    "entry_regime":     "<bull | normal | null>"
+    "entry_regime":     "<bull | normal | null>",
+    "atr_4h_pct":       <number | null>
   },
   "exits": [
     {
-      "lot_index":   <number>,
-      "decision":    "<SELL | HOLD>",
-      "sell_pct":    <50 | 100 | null>,
-      "exit_reason": "<stop_loss | regime_drop | take_profit | scalp | null>"
+      "position_index": <number>,
+      "decision":       "<SELL | HOLD>",
+      "sell_pct":       <50 | 100 | null>,
+      "exit_reason":    "<stop_loss | regime_drop | take_profit | scalp | null>"
     }
   ]
-})
+}
 ```
 
-Error fallback (either upstream stage absent or contains `error`):
-```
-write_cycle_state(vaultAddress=<vault>, state={
-  "entry": { "decision": "HOLD", "needs_withdraw": false, "buying_power_usd": 0, "entry_regime": null },
-  "exits": []
-})
-```
+Error fallback — if either upstream stage is absent or contains an `error` key, emit the decision summary with a single line "ERROR: <description>" then emit this JSON as the absolute last line:
 
----
-
-## Decision summary (output after writing state)
-
-```
-DECIDE
-  regime: <current.regime> | rsi_1h: <previous_cycle.rsi_1h>→<current.rsi_1h> | buying_power: $<buying_power_usd>
-
-  ENTRY → <BUY | HOLD>
-    [BUY]  entry_regime: <entry_regime> | needs_withdraw: <true/false>
-    [HOLD] <one-sentence reason>
-
-  EXITS (<n> lots evaluated)
-    [lot <n>] <SELL exit_reason sell_pct% | HOLD reason>
-    ...
+```json
+{
+  "entry": { "decision": "HOLD", "needs_withdraw": false, "buying_power_usd": 0, "entry_regime": null, "atr_4h_pct": null },
+  "exits": [],
+  "error": "<description>"
+}
 ```

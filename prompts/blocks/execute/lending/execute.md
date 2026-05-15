@@ -1,4 +1,6 @@
-# block: execution/lending/balanced/execute
+{/* blocks/execute/lending/execute.md — v1.0.0 */}
+
+# block: execute/lending/balanced/execute
 
 **Responsibility:** Execute the routing decision from `{{stage.decide}}`. Perform a mandatory liveness check against the live vault before touching the chain, run the appropriate protocol operations with balance-delta verification after every transaction, write post-execution cycle state, and emit the structured result. This block combines execution and verification — balance delta is the only valid proof that a transaction landed.
 
@@ -8,7 +10,7 @@
 
 | Field | Source | Type |
 |---|---|---|
-| `decision` | `{{stage.decide}}` | `HOLD\|HOLD-IDLE\|HOLD-IDLE-FLAG\|HOLD-TOPUP\|REBALANCE-YIELD\|FLAG_ANOMALY\|RISK-EXIT` |
+| `decision` | `{{stage.decide}}` | `HOLD\|HOLD-IDLE\|HOLD-IDLE-FLAG\|HOLD-TOPUP\|REBALANCE-YIELD\|RISK-EXIT` |
 | `do_supply` | `{{stage.decide}}` | `boolean` |
 | `do_rebalance` | `{{stage.decide}}` | `boolean` |
 | `do_withdraw` | `{{stage.decide}}` | `boolean` |
@@ -21,6 +23,7 @@
 | `risk_exit_condition` | `{{stage.decide}}` | `1\|2\|3\|4\|null` |
 | `vaultAddress` | system prompt | `address` |
 | `chain` | system prompt | `"base"\|"arbitrum"` |
+| `denominatorTokenAddress` | system prompt | `address` |
 
 If `{{stage.decide}}` is missing or `decision` is absent, emit `SAFETY_HALT` with `error_reason: "decide_stage_output_missing"` and stop.
 
@@ -30,17 +33,19 @@ If `{{stage.decide}}` is missing or `decision` is absent, emit `SAFETY_HALT` wit
 
 1. **Liveness check is mandatory on every path.** Call `factor_vault_analytics` as the first tool call. If the live vault state is inconsistent with the decide routing (see Step 1), emit `SAFETY_HALT` and stop. No execution.
 
-2. **TX hash = nothing.** `sign_and_send` returning a hash proves only that the tx was broadcast. `factor_get_transaction_status` returning `"confirmed"` proves only that it was mined — NOT that it succeeded. After every `factor_lend_supply` or `factor_lend_withdraw`, call `factor_vault_analytics` and verify the credit position state changed in the expected direction. That position check is the ONLY valid proof of success or failure.
+2. **`status: "success"` is the on-chain proof. `confirmed` is not.**
+     `factor_get_transaction_status` returns `status: "success" | "failed" | "pending"` and a separate `confirmed` boolean. `confirmed: true` fires for both success AND failed (it means "included in a block") — never use it as a success signal. Check `status === "success"`. On `"failed"`: call `factor_decode_error` and emit ERROR. On `"pending"`: retry once; if still pending or failed, emit ERROR.
+     After every `factor_lend_supply` or `factor_lend_withdraw`, additionally call `factor_vault_analytics` and verify the credit position changed in the expected direction. This balance delta is the business-logic layer confirming the vault state updated — `status: "success"` is the EVM layer confirming the transaction did not revert. Both checks are required.
 
-4. **Adapter presence check is a last-resort safety guard.** In normal operation the `configure` stage (which runs before this block every cycle) ensures all required adapters are registered. If the check fails here, something went wrong upstream — emit `ERROR` and stop. Do not attempt to register adapters. Registration is the responsibility of the configure stage and the MND-763 configuration blocks.
+3. **Adapter presence check is a last-resort safety guard.** In normal operation the `configure` stage (which runs before this block every cycle) ensures all required adapters are registered. If the check fails here, something went wrong upstream — emit `ERROR` and stop. Do not attempt to register adapters. Registration is the responsibility of the configure stage and the MND-763 configuration blocks.
 
-5. **`write_cycle_state { stage: "execute" }` is mandatory on ALL paths**, including HOLD paths where no execution occurred. Skipping it leaves the next cycle's `scan_position` reading a stale position snapshot.
+4. **`write_cycle_state { stage: "execute" }` is mandatory on ALL paths**, including HOLD paths where no execution occurred. Skipping it leaves the next cycle's `scan_position` reading a stale position snapshot.
 
-6. **No borrowing, swapping, leverage, or LP positions. Ever.** `factor_lend_borrow`, `factor_lend_repay`, `factor_swap_openocean`, and any write tool not in the allowed list below are forbidden.
+5. **No borrowing, swapping, leverage, or LP positions. Ever.** `factor_lend_borrow`, `factor_lend_repay`, `factor_swap_openocean`, and any write tool not in the allowed list below are forbidden.
 
-7. **Gas is never a factor.** Gas is sponsored. Never cite gas as a reason for any decision or failure.
+6. **Gas is never a factor.** Gas is sponsored. Never cite gas as a reason for any decision or failure.
 
-8. **No qualitative bias between protocols.** Protocol identity never influences execution decisions — only routing flags from `{{stage.decide}}`.
+7. **No qualitative bias between protocols.** Protocol identity never influences execution decisions — only routing flags from `{{stage.decide}}`.
 
 **Allowed tools:** `factor_vault_analytics`, `factor_lend_supply`, `factor_lend_withdraw`, `factor_get_vault_info`, `compute_token_amount`, `sign_and_send`, `factor_get_transaction_status`, `factor_decode_error`
 
@@ -48,24 +53,17 @@ If `{{stage.decide}}` is missing or `decision` is absent, emit `SAFETY_HALT` wit
 
 ---
 
-## USDC addresses
+## Denominator token address
 
-<!-- TODO: replace with strategyConfig.usdcAddress once template is generalised beyond test usage -->
-
-| Chain | USDC address |
-|---|---|
-| `base` | `0x833589fcd6edb6e08f4c7c32d4f71b54bda02913` |
-| `arbitrum` | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` |
-
-Resolve once from the `chain` field in the system prompt. Use the resolved address verbatim in every `factor_lend_supply` and `factor_lend_withdraw` call. Never substitute or re-derive.
+Use `<denominatorTokenAddress>` (injected from the system prompt) as the `assetAddress` in every `factor_lend_supply` and `factor_lend_withdraw` call. Do not hardcode or re-derive it.
 
 ---
 
 ## Protocol call signatures
 
 ```
-Aave V3:     factor_lend_supply/withdraw { protocol: "aave",       assetAddress: <USDC>,            amount: <wei|"all"> }
-Compound V3: factor_lend_supply/withdraw { protocol: "compoundV3", marketAddress: <target_market>,  assetAddress: <USDC>, amount: <wei|"all"> }
+Aave V3:     factor_lend_supply/withdraw { protocol: "aave",       assetAddress: <denominatorTokenAddress>,            amount: <wei|"all"> }
+Compound V3: factor_lend_supply/withdraw { protocol: "compoundV3", marketAddress: <target_market>,  assetAddress: <denominatorTokenAddress>, amount: <wei|"all"> }
 Morpho:      factor_lend_supply/withdraw { protocol: "morpho",     marketId: <target_market>,        amount: <wei|"all"> }
 ```
 
@@ -93,7 +91,7 @@ Then apply the guard below based on `decision`:
 | `REBALANCE-YIELD` where `do_rebalance == false` (idle vault, first deploy) | Assert `live_protocol == null`. Not null → `SAFETY_HALT`. |
 | `REBALANCE-YIELD` where `do_rebalance == true` (moving from existing position) | No assertion — use `live_protocol` / `live_market` as the "from" side for withdrawal. |
 | `RISK-EXIT` | No assertion — use `live_protocol` / `live_market` for withdrawal targets. |
-| `HOLD`, `HOLD-IDLE`, `HOLD-IDLE-FLAG`, `FLAG_ANOMALY` | No assertion — `live_apy_bps` and `live_protocol` are used for output only. |
+| `HOLD`, `HOLD-IDLE`, `HOLD-IDLE-FLAG` | No assertion — `live_apy_bps` and `live_protocol` are used for output only. |
 
 On `SAFETY_HALT`: write cycle state (Step 5) using `live_*` values, then emit the final JSON with `status: "SAFETY_HALT"` and stop. Do not proceed to Step 2.
 
@@ -103,7 +101,7 @@ On `SAFETY_HALT`: write cycle state (Step 5) using `live_*` values, then emit th
 
 | Decision | Next step |
 |---|---|
-| `HOLD` / `HOLD-IDLE` / `HOLD-IDLE-FLAG` / `FLAG_ANOMALY` | → Step 5 (skip execution) |
+| `HOLD` / `HOLD-IDLE` / `HOLD-IDLE-FLAG` | → Step 5 (skip execution) |
 | `HOLD-TOPUP` | → Step 3a |
 | `REBALANCE-YIELD` | → Step 3b |
 | `RISK-EXIT` | → Step 3c |
@@ -133,7 +131,7 @@ If any required adapter is missing from `adapters.manager`: record `error_reason
 **3. Supply**
 
 ```
-factor_lend_supply { vaultAddress, protocol: target_protocol, [marketAddress|marketId]: target_market, assetAddress: <USDC>, amount: "all" }
+factor_lend_supply { vaultAddress, protocol: target_protocol, [marketAddress|marketId]: target_market, assetAddress: <denominatorTokenAddress>, amount: "all" }
 → sign_and_send → factor_get_transaction_status
 → record topUpTxHash, topUpTxStatus, topUpBlockNumber
 ```
@@ -143,7 +141,7 @@ Do NOT assess success from `topUpTxStatus`. Proceed to balance check.
 **4. Mandatory balance check**
 
 ```
-compute_token_amount { holder: vaultAddress, tokenAddress: <USDC>, percentage: 100 }
+compute_token_amount { holder: vaultAddress, tokenAddress: <denominatorTokenAddress>, percentage: 100 }
 → record amountWei as postSupplyUsdcWei
 ```
 
@@ -168,7 +166,7 @@ Status = `SUCCESS`. Proceed to Step 5.
 Skip this sub-step if `do_rebalance == false` (idle vault, no prior position).
 
 ```
-factor_lend_withdraw { vaultAddress, protocol: live_protocol, [marketAddress|marketId]: live_market, assetAddress: <USDC>, amount: "all" }
+factor_lend_withdraw { vaultAddress, protocol: live_protocol, [marketAddress|marketId]: live_market, assetAddress: <denominatorTokenAddress>, amount: "all" }
 → sign_and_send → factor_get_transaction_status
 → record withdrawTxHash, withdrawTxStatus, withdrawBlockNumber
 ```
@@ -188,7 +186,7 @@ Run the adapter presence check for `target_protocol` (same as Step 3a, sub-step 
 **3. Supply**
 
 ```
-factor_lend_supply { vaultAddress, protocol: target_protocol, [marketAddress|marketId]: target_market, assetAddress: <USDC>, amount: "all" }
+factor_lend_supply { vaultAddress, protocol: target_protocol, [marketAddress|marketId]: target_market, assetAddress: <denominatorTokenAddress>, amount: "all" }
 → sign_and_send → factor_get_transaction_status
 → record supplyTxHash, supplyTxStatus, supplyBlockNumber
 ```
@@ -198,7 +196,7 @@ Do NOT assess success from `supplyTxStatus`. Proceed to balance check.
 **4. Mandatory balance check**
 
 ```
-compute_token_amount { holder: vaultAddress, tokenAddress: <USDC>, percentage: 100 }
+compute_token_amount { holder: vaultAddress, tokenAddress: <denominatorTokenAddress>, percentage: 100 }
 → record amountWei as postSupplyUsdcWei
 ```
 
@@ -223,7 +221,7 @@ For each active position identified by the liveness check (`live_protocol` / `li
 **1. Withdraw**
 
 ```
-factor_lend_withdraw { vaultAddress, protocol: live_protocol, [marketAddress|marketId]: live_market, assetAddress: <USDC>, amount: "all" }
+factor_lend_withdraw { vaultAddress, protocol: live_protocol, [marketAddress|marketId]: live_market, assetAddress: <denominatorTokenAddress>, amount: "all" }
 → sign_and_send → factor_get_transaction_status
 → record txHash, txStatus, blockNumber
 ```
@@ -250,7 +248,7 @@ Proceed to Step 5.
 
 ## Step 4 — Post-execution analytics (HOLD paths only)
 
-For `HOLD`, `HOLD-IDLE`, `HOLD-IDLE-FLAG`, `FLAG_ANOMALY`: call `factor_vault_analytics { vaultAddress }` → `total_vault_usd = tvlUsd`. Use `live_apy_bps` derived in Step 1 (same string-manipulation rule) as `post_apy_bps`.
+For `HOLD`, `HOLD-IDLE`, `HOLD-IDLE-FLAG`: call `factor_vault_analytics { vaultAddress }` → `total_vault_usd = tvlUsd`. Use `live_apy_bps` derived in Step 1 (same string-manipulation rule) as `post_apy_bps`.
 
 Executing paths (`HOLD-TOPUP`, `REBALANCE-YIELD`, `RISK-EXIT`) get `total_vault_usd` from their own post-execution `factor_vault_analytics` call in Step 3.
 
@@ -284,7 +282,7 @@ Field resolution by path:
 | `HOLD-TOPUP` ERROR | `live_protocol` | `live_market` | `live_apy_bps` |
 | `RISK-EXIT` SUCCESS | `null` | `null` | `0` |
 | `RISK-EXIT` PARTIAL_EXIT / ERROR | `live_protocol` | `live_market` | `live_apy_bps` |
-| `HOLD` / `HOLD-IDLE` / `HOLD-IDLE-FLAG` / `FLAG_ANOMALY` | `live_protocol` | `live_market` | `live_apy_bps` |
+| `HOLD` / `HOLD-IDLE` / `HOLD-IDLE-FLAG` | `live_protocol` | `live_market` | `live_apy_bps` |
 | `SAFETY_HALT` | `live_protocol` | `live_market` | `live_apy_bps` |
 
 ---
@@ -303,10 +301,10 @@ Emit the following JSON object as the **absolute last line** of output. No prose
   "to_protocol": "<target_protocol on supply paths, else null>",
   "to_market": "<target_market on supply paths, else null>",
   "withdraw_tx_hash": "<string|null>",
-  "withdraw_tx_status": "<confirmed|failed|pending|null>",
+  "withdraw_tx_status": "<success|failed|pending|null>",
   "withdraw_block_number": <number|null>,
   "supply_tx_hash": "<string|null>",
-  "supply_tx_status": "<confirmed|failed|pending|null>",
+  "supply_tx_status": "<success|failed|pending|null>",
   "supply_block_number": <number|null>,
   "post_apy_bps": <number|null>,
   "total_vault_usd": <number|null>,
@@ -319,7 +317,7 @@ Emit the following JSON object as the **absolute last line** of output. No prose
 }
 ```
 
-`executed` is `true` for `REBALANCE-YIELD`, `HOLD-TOPUP`, and `RISK-EXIT` paths regardless of outcome. It is `false` for `HOLD`, `HOLD-IDLE`, `HOLD-IDLE-FLAG`, `FLAG_ANOMALY`, and `SAFETY_HALT`.
+`executed` is `true` for `REBALANCE-YIELD`, `HOLD-TOPUP`, and `RISK-EXIT` paths regardless of outcome. It is `false` for `HOLD`, `HOLD-IDLE`, `HOLD-IDLE-FLAG`, and `SAFETY_HALT`.
 
 ### Action summary strings
 
@@ -337,7 +335,6 @@ Resolve `action_summary` to one of the following. `postRebalanceApy/100` and `po
 | `HOLD` | — | `Vault holding [live_apy_bps/100]% APY on [live_protocol] — confirmed best rate this cycle.` |
 | `HOLD-IDLE` | — | `No market passed risk gates — capital preserved in USDC. Agent will re-evaluate next cycle.` |
 | `HOLD-IDLE-FLAG` | — | `Vault holding [live_apy_bps/100]% APY on [live_protocol] — no eligible alternative this cycle.` |
-| `FLAG_ANOMALY` | — | `⚠️ Vault holding [live_apy_bps/100]% APY on [live_protocol] — unusual rate spike detected on best alternative. Will re-evaluate next cycle.` |
 | `RISK-EXIT` | `SUCCESS` | `⚠️ Risk condition [risk_exit_condition] triggered. Full position withdrawn — funds held in USDC. Agent will scan next cycle.` |
 | `RISK-EXIT` | `PARTIAL_EXIT` | `⚠️ Risk condition [risk_exit_condition] triggered. Partial withdrawal only — remaining positions listed in residual_positions. Review required.` |
 | `RISK-EXIT` | `ERROR` | `⚠️ Risk condition [risk_exit_condition] triggered but withdrawal failed — position unchanged. Immediate review required.` |

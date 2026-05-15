@@ -1,3 +1,5 @@
+{/* blocks/vault/scan-position-trading.md — v1.0.0 */}
+
 # block: vault/scan-position-trading
 **Responsibility:** Read and emit the current trading vault position: idle USDC, Aave credit (efficient variant), and all held trading token positions. Detect external deposits/withdrawals by comparing vault share supply to the previous cycle. Surface vault-state anomalies (end-of-cycle invariant violations, unexpected tokens). Owns its own inter-cycle state (`vault_position_trading`). No TA. No market data. No decisions. No execution.
 
@@ -56,30 +58,37 @@ The tool always returns `{ ok: true, state: <blob> | null }`.
 
 Call `read_cycle_state`:
 ```
-read_cycle_state { stage: "open_position_trading" }
+read_cycle_state { stage: "execute" }
 ```
 
 The tool always returns `{ ok: true, state: <blob> | null }`.
 - `state` is not null → assign as `positionState`. Extract:
-  - `positionState.positions` → `openPositions` (array of lots; may be empty)
-  - `positionState.last_buy_timestamp` → `lastBuyTimestamp`
-- `state` is null OR `positionState.positions` is empty → no tracked position. Set `openPositions = []`, `lastBuyTimestamp = null`.
+  - `positionState.positions` → `openPositions` (array of positions; may be empty)
+- `state` is null OR `positionState.positions` is empty → no tracked positions. Set `openPositions = []`.
 
-Each lot in `openPositions` has the shape written by the execute block:
+Each position in `openPositions` has the shape written by the execute block:
 ```
 {
-  "cost_basis_usd":   <number>,
-  "scalp_target_usd": <number>,
-  "tp_target_usd":    <number>,
-  "stop_loss_usd":    <number>,
-  "entry_regime":     "<string>",
-  "buy_timestamp":    <unix_seconds>
+  "position_index":         <number>,
+  "cost_basis_usd":         <number>,
+  "scalp_target_usd":       <number>,
+  "tp_target_usd":          <number>,
+  "stop_loss_usd":          <number | null>,
+  "scalp_net_pct":          <number>,
+  "tp_net_pct":             <number>,
+  "scalp_cost_basis_usd":   <number>,
+  "position_token_qty":     <number>,
+  "trade_count":            <number>,
+  "entry_regime":           "<string>",
+  "buy_timestamp":          <unix_seconds>
 }
 ```
 
-Compute `buy_cooldown_active` (the only arithmetic permitted in this block):
-- `lastBuyTimestamp` is null → `buy_cooldown_active = false`.
-- Otherwise: `buy_cooldown_active = (currentUnixTimestamp − lastBuyTimestamp) < 7200`.
+Compute `lastBuyTimestamp` and `buy_cooldown_active` (the only arithmetic permitted in this block):
+- IF `openPositions` is empty → `lastBuyTimestamp = null`, `buy_cooldown_active = false`.
+- ELSE → `lastBuyTimestamp = max(openPositions.map(p => p.buy_timestamp))` (the most recent position's entry timestamp).
+- IF `lastBuyTimestamp` is null → `buy_cooldown_active = false`.
+- ELSE: `buy_cooldown_active = (currentUnixTimestamp − lastBuyTimestamp) < 7200`.
   Use the current Unix timestamp (seconds since epoch) at the time this block executes.
 
 ---
@@ -138,12 +147,12 @@ Walk `balances[]` from Step 2. Classify each entry by matching its `address` aga
 
 | Match | Classification | Action |
 |---|---|---|
-| `address == denominatorTokenAddress` | Idle USDC | Set `usdcBal = usdValue` |
+| `address == denominatorTokenAddress` | Idle USDC | Set `idleUsdc = usdValue` |
 | `address == aaveReceiptTokenAddress` (when configured) | Aave credit | Confirms Aave supply is present; `creditUsd` already populated from `lending.aave` in Step 2 — use that value as authoritative |
 | `address == tradingTokenAddress` | Trading position | Append to `positions[]` |
 | Anything else | Unexpected | Append to `unexpectedTokens[]` |
 
-`usdcBal` = 0 if no USDC entry in `balances[]`.
+`idleUsdc` = 0 if no USDC entry in `balances[]`.
 
 `positions[]` structure — one entry per trading token balance:
 ```
@@ -157,8 +166,8 @@ Walk `balances[]` from Step 2. Classify each entry by matching its `address` aga
 Build `anomalies[]`. Append a descriptive string for each condition that is true:
 
 1. **End-of-cycle invariant violation — idle USDC with no open position**
-   `usdcBal > 1 AND positions[] is empty`
-   → append `"idle_usdc_above_invariant: usdc_bal=$<usdcBal> no_open_position"`
+   `idleUsdc > 1 AND positions[] is empty`
+   → append `"idle_usdc_above_invariant: idle_usdc=$<idleUsdc> no_open_position"`
    This indicates the previous cycle ended without sweeping idle USDC to Aave.
 
 2. **Unexpected token in vault**
@@ -181,13 +190,13 @@ write_cycle_state {
 
 The tool returns `{ ok: true }` on success. On error, log the error string and continue to emit the final JSON — the next cycle will treat `null` state as first-cycle.
 
-> **Do not write to `open_position_trading` state.** That stage is owned exclusively by the execute block — written on BUY, cleared on full SELL. This block only reads it.
+> **Do not write to `execute` state.** That stage is owned exclusively by the execute block — written on BUY, modified on partial SELL, cleared on full SELL. This block only reads it.
 
 **Emit the following JSON object as the absolute last line of your response. No prose after it.**
 
 ```json
 {
-  "usdc_bal":               <number>,
+  "idle_usdc":              <number>,
   "credit_usd":             <number>,
   "positions": [
     {
@@ -199,12 +208,18 @@ The tool returns `{ ok: true }` on success. On error, log the error string and c
   ],
   "open_positions": [
     {
-      "cost_basis_usd":     <number>,
-      "scalp_target_usd":   <number>,
-      "tp_target_usd":      <number>,
-      "stop_loss_usd":      <number>,
-      "entry_regime":       "<string>",
-      "buy_timestamp":      <number>
+      "position_index":         <number>,
+      "cost_basis_usd":         <number>,
+      "scalp_target_usd":       <number>,
+      "tp_target_usd":          <number>,
+      "stop_loss_usd":          <number | null>,
+      "scalp_net_pct":          <number>,
+      "tp_net_pct":             <number>,
+      "scalp_cost_basis_usd":   <number>,
+      "position_token_qty":     <number>,
+      "trade_count":            <number>,
+      "entry_regime":           "<string>",
+      "buy_timestamp":          <number>
     }
   ],
   "buy_cooldown_active":    <boolean>,
@@ -216,8 +231,8 @@ The tool returns `{ ok: true }` on success. On error, log the error string and c
 ```
 
 `positions` = on-chain balances from `factor_vault_analytics`; `[]` when vault holds no trading token.
-`open_positions` = tracked BUY lots from `open_position_trading` cycle state; `[]` when no position is recorded. Each lot carries its own cost basis, exit targets, entry regime, and buy timestamp — written by the execute block on BUY, reduced on partial SELL, cleared on full SELL.
-`buy_cooldown_active` = `false` when no `last_buy_timestamp` is recorded; `true` when fewer than 7200 seconds have elapsed since the last BUY.
+`open_positions` = tracked positions from `execute` cycle state; `[]` when no position is recorded. Each position carries its own cost basis, exit targets, entry regime, buy timestamp, and trade metadata — written by the execute block on BUY, modified on partial SELL, cleared on full SELL.
+`buy_cooldown_active` = `false` when no tracked positions exist; `true` when fewer than 7200 seconds have elapsed since the most recent BUY (derived from `max(buy_timestamp)` across all positions).
 `anomalies` = `[]` when no anomalies are detected.
 
 The orchestrator reads this as `{{previous}}` for downstream stages. On any unrecoverable error, emit `{ "error": "<description>", "anomalies": [] }`.

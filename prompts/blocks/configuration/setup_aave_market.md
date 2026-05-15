@@ -1,3 +1,5 @@
+{/* blocks/configuration/setup_aave_market.md — v1.0.0 */}
+
 ## Block: setup_aave_market
 
 Ensures a Factor vault has the **Aave V3** adapter and aToken registered and ready for supply. Designed to run at the start of every cycle as part of the protocol configuration chain. Idempotent — in steady state the pre-flight check confirms both are already registered and exits immediately with a single `factor_get_vault_info` call and no transactions.
@@ -24,8 +26,8 @@ This block is protocol-agnostic and can be plugged into any strategy that includ
 Call `factor_get_vault_info` with `vaultAddress = {{vault_address}}`.
 
 Record two flags independently:
-- `adapter_missing` = `true` if `managerAdapters` does NOT contain `factor_aave_adapter_pro`; `false` if it does
-- `atoken_missing` = `true` if `assets` does NOT include `{{a_token_address}}`; `false` if it does
+- `adapter_missing` = `true` if `adapters.manager` does NOT contain `factor_aave_adapter_pro`; `false` if it does
+- `atoken_missing` = `true` if `assets.supported` does NOT include `{{a_token_address}}`; `false` if it does
 
 If **both conditions are already satisfied** (adapter present AND aToken registered) → **STOP immediately. Do not call `factor_get_address_book`, `factor_add_adapter`, `factor_add_vault_token`, or any other tool.** This is the expected outcome on every cycle after the first setup run. Emit `{"configured":true,"skipped":true,"reason":"already_configured","protocol":"aave","asset":"{{asset_symbol}}"}` as the final output and exit.
 
@@ -49,7 +51,7 @@ factor_add_adapter({
   vaultAddress: "{{vault_address}}",
   adapterAddress: <addr_aave_adapter>
 })
-→ sign_and_send → factor_get_transaction_status (must be 0x1)
+→ sign_and_send → factor_get_transaction_status (must be "success"; retry once on "pending")
 ```
 
 If the transaction reverts with `Already exists`, treat as a no-op and continue.
@@ -64,7 +66,7 @@ factor_add_vault_token({
   tokenAddress: "{{a_token_address}}",
   type: "asset"
 })
-→ sign_and_send → factor_get_transaction_status (must be 0x1)
+→ sign_and_send → factor_get_transaction_status (must be "success"; retry once on "pending")
 ```
 
 If the transaction reverts with `Already exists`, treat as a no-op.
@@ -72,8 +74,8 @@ If the transaction reverts with `Already exists`, treat as a no-op.
 ### Step 4 — Verify
 
 Call `factor_get_vault_info` with `vaultAddress = {{vault_address}}` and confirm:
-- `managerAdapters` contains `factor_aave_adapter_pro`.
-- `assets` contains `{{a_token_address}}`.
+- `adapters.manager` contains `factor_aave_adapter_pro`.
+- `assets.supported` contains `{{a_token_address}}`.
 
 If both are present, the vault is correctly configured.
 
@@ -99,7 +101,7 @@ If both are present, the vault is correctly configured.
 
 1. **`factor_add_adapter` takes `adapterAddress` only** — resolve `factor_aave_adapter_pro` from `factor_get_address_book` first (Step 1). There is no `adapterType` field on this tool.
 2. **`type: "asset"` is required on `factor_add_vault_token`** — omitting it will fail schema validation.
-3. **Pre-flight checks `{{a_token_address}}` in `assets[]`, NOT `{{asset_address}}`** — the aToken is what gets registered, not the underlying ERC20.
+3. **Pre-flight checks `{{a_token_address}}` in `assets.supported[]`, NOT `{{asset_address}}`** — the aToken is what gets registered, not the underlying ERC20.
 4. **NEVER call `addMarketToAssetAndDebt` or `factor_execute_manager`** — Aave V3 has no market registry. Any call to `factor_execute_manager` from this block is forbidden.
-5. Every `sign_and_send` call **must** be immediately followed by `factor_get_transaction_status`. **A transaction can be confirmed (included in a block) and still fail on-chain.** `status = "0x0"` means an EVM revert — the tx was mined but its execution reverted. Only `status = "0x1"` means the operation succeeded. Do not proceed past any step until you observe `"0x1"`.
-6. On any non-`0x1` status (including `"0x0"` EVM revert): call `factor_decode_error` once, set `errors`, emit final JSON, and **STOP** — do not retry or attempt recovery.
+5. Every `sign_and_send` call **must** be immediately followed by `factor_get_transaction_status`. The tool returns `"success"`, `"pending"`, or `"failed"` — never hex. **A transaction can be confirmed on-chain and still fail (EVM revert).** Only `status == "success"` means the operation succeeded. On `"pending"`: retry `factor_get_transaction_status` once. If the retry returns `"pending"` or `"failed"`, treat as failure. Do not proceed past any step until you observe `"success"`.
+6. On `"failed"` or a second `"pending"`: call `factor_decode_error` once, set `errors`, emit final JSON, and **STOP** — do not retry or attempt recovery.

@@ -1,3 +1,5 @@
+{/* blocks/vault/scan-position-lending.md — v1.0.0 */}
+
 # block: vault/scan-position-lending
 **Responsibility:** Read and emit the current lending vault position: active protocol, market, idle USDC, and receipt token. Detect external deposits/withdrawals by comparing vault share supply to the previous cycle. Surface vault-state anomalies (unexpected borrow, receipt token mismatch, multiple simultaneous positions). Cross-reference the current position against `{{stage.scan_lending_markets}}` to surface market-level risk flags (market exited eligible set, APY anomalous). Owns its own inter-cycle state (`vault_position_lending`). No market-facing tool calls. No decisions. No execution.
 
@@ -7,9 +9,10 @@
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `protocols` | string[] | — | **Required.** Whitelisted protocols. Valid values: `"aave"`, `"compoundV3"`, `"morpho"`. Used to validate which receipt tokens are expected in the vault. |
-| `token` | string | — | **Required.** Denominator asset symbol (e.g. `"USDC"`). Used to identify the idle balance in `balances[]`. |
-| `chain` | string | — | **Required.** Chain name (e.g. `"Base"`, `"Arbitrum"`). Used to determine Morpho availability. |
+| `protocols` | string[] | `["aave","compoundV3","morpho"]` | **Required.** Whitelisted protocols. Valid values: `"aave"`, `"compoundV3"`, `"morpho"`. Used to validate which receipt tokens are expected in the vault. |
+| `token` | string | `"USDC"` | **Required.** Denominator asset symbol (e.g. `"USDC"`). Used to identify the idle balance in `balances[]`. |
+| `chain` | string | `"Base"` | **Required.** Chain name (e.g. `"Base"`, `"Arbitrum"`). Used to determine Morpho availability. |
+| `riskGates.anomalySpikeBps` | number | `300` | APY spike threshold in bps for inter-cycle anomaly detection. Mirrors the same field in `scan-lending-markets`. |
 
 A required field absent from `strategyConfig` is a misconfiguration. Emit `{ "error": "misconfiguration", "missing": ["<field>"] }` as the final JSON line and stop.
 
@@ -19,7 +22,7 @@ A required field absent from `strategyConfig` is a misconfiguration. Emit `{ "er
 
 1. **`factor_vault_analytics` is called exactly once.** Do not call it again or read vault state from any other source.
 
-2. **`factor_get_shares` is called exactly once** with `userAddress = vaultAddress`. Only `totalSupply.formatted` and `pricePerShare.formatted` are used. The per-user `shares` field is irrelevant — ignore it.
+2. **`factor_get_shares` is called exactly once** with `userAddress = vaultAddress`. Only `totalSupply.formatted` is used. The per-user `shares` field is irrelevant — ignore it.
 
 3. **No market-facing tool calls.** Do not call `defi_llama_yields`, `factor_get_morpho_markets`, `factor_get_lending_tokens`, or any market tool. All market data is read exclusively from `{{stage.scan_lending_markets}}` in Step 7.
 
@@ -37,15 +40,7 @@ A required field absent from `strategyConfig` is a misconfiguration. Emit `{ "er
 
 ## Step 1 — Read config and previous cycle state
 
-> **Testing note:** values below are hardcoded for the `lending-balanced` v17 strategy. The injection table above is preserved for future generalization — when ready, replace each literal with the corresponding `strategyConfig` field.
-
-Use the following hardcoded values (do not read from `strategyConfig`):
-
-```
-protocols = ["aave", "compoundV3", "morpho"]
-token     = "USDC"
-chain     = "Base"
-```
+Apply the default values from the injected inputs table above.
 
 Call `read_cycle_state`:
 ```
@@ -54,12 +49,14 @@ read_cycle_state { stage: "vault_position_lending" }
 
 The tool always returns `{ ok: true, state: <blob> | null }`.
 - `state` is not null → assign as `previousState`. Extract:
-  - `previousTotalSupply`
-  - `previousProtocol`
-  - `previousMarket`
-  - `previousReceiptTokenAddress`
-  - `previousCurrentApy`
+  - `previousTotalSupply` ← previousState.total_supply
+  - `previousProtocol` ← previousState.current_protocol
+  - `previousMarket` ← previousState.current_market
+  - `previousReceiptTokenAddress` ← previousState.receipt_token_address
+  - `previousCurrentApy` ← previousState.current_apy_bps
 - `state` is null → first cycle. Set all previous fields to `null`.
+
+Read `anomalySpikeBps` from `strategyConfig.riskGates.anomalySpikeBps`. If absent, default to `300`.
 
 ---
 
@@ -71,7 +68,7 @@ factor_vault_analytics { vaultAddress }
 
 From the result, extract:
 - `balances[]` — all non-zero token balances. For each entry record `symbol`, `address`, `amount`, `usdValue`.
-- `stats.totalUsd` → `totalVaultUsd`.
+- `tvlUsd` → `total_vault_usd`.
 - `lending` block (omitted entirely when no lending exposure):
   - `lending.aave` → if present and `totalCollateralUsd > 0`: Aave position is active. If `totalDebtUsd > 0`: unexpected borrow detected.
   - `lending.morpho[]` → for each entry with `supplyUsd > 0`: Morpho position is active. Extract `id` (the bytes32 marketId as returned by the tool) and `loanAsset.symbol`. If `borrowUsd > 0` on any entry: unexpected borrow detected.
@@ -137,7 +134,7 @@ Evaluate in order — first match wins:
 4. None of the above
    → `currentProtocol = null`, `currentMarket = null`, `receiptTokenAddress = null` (vault is idle)
 
-`idleUsdc` = `usdValue` of the entry in `balances[]` where `symbol == "USDC"` (0 if absent).
+`idle_usdc` = `usdValue` of the entry in `balances[]` where `symbol == "USDC"` (0 if absent).
 
 ---
 
@@ -199,10 +196,10 @@ Note: For Aave V3, both `currentMarket` and `entry.market` are `null` — a null
 ```
 currentMarketEligible = true
 currentMarketTag      = entry.tag        // "clean" | "anomalous" | "new"
-currentApyBps         = entry.apyBaseBps
+currentApyBps         = entry.apy_base_bps
 ```
 If `currentMarketTag == "anomalous"`:
-→ append `"current_market_apy_anomalous: apyBaseBps=<currentApyBps>"` to `anomalies[]`.
+→ append `"current_market_apy_anomalous: apy_base_bps=<currentApyBps>"` to `anomalies[]`.
 
 **If no match is found** (market was present last cycle but is absent from eligible set this cycle):
 ```
@@ -212,6 +209,11 @@ currentApyBps         = null
 ```
 → append `"current_market_not_eligible: <currentProtocol> <currentMarket>"` to `anomalies[]`.
 
+Search `scanMarketsOutput.failed` for an entry where `protocol == currentProtocol` AND `market == currentMarket` (null-to-null match is valid for Aave).
+
+* Match found → `currentMarketExitReason = entry.reason`
+* No match → `currentMarketExitReason = null`
+
 **Compute inter-cycle APY anomaly** (always run after setting `currentApyBps`):
 
 ```
@@ -220,18 +222,21 @@ IF previousCurrentApy is null OR currentApyBps is null:
   anomalyDirection       = null
 
 ELSE:
-  diff = currentApyBps − previousCurrentApy
+  math_calculate(operation: "add", operands: [<previousCurrentApy>, <anomalySpikeBps>])  → spikeBound
+  math_calculate(operation: "subtract", operands: [<previousCurrentApy>, <anomalySpikeBps>])  → dropBound
 
-  IF diff > 300 OR diff < −300:
+  IF currentApyBps > spikeBound:
     currentMarketAnomalous = true
-    anomalyDirection       = "spike" IF diff > 0 ELSE "drop"
-
+    anomalyDirection       = "spike"
+  ELSE IF currentApyBps < dropBound:
+    currentMarketAnomalous = true
+    anomalyDirection       = "drop"
   ELSE:
     currentMarketAnomalous = false
     anomalyDirection       = null
 ```
 
-The `300 bps` threshold mirrors `riskGates.anomalySpikeBps` from `scan-lending-markets`. Do NOT add `currentMarketAnomalous` to `anomalies[]` — it is a boolean routing flag emitted as a top-level output field for the decide block to consume directly.
+`anomalySpikeBps` is read from `strategyConfig.riskGates.anomalySpikeBps` (default 300) — the same value used by `scan-lending-markets`. Do NOT add `currentMarketAnomalous` to `anomalies[]` — it is a boolean routing flag emitted as a top-level output field for the decide block to consume directly.
 
 ---
 
@@ -242,12 +247,12 @@ Call `write_cycle_state`:
 write_cycle_state {
   stage: "vault_position_lending",
   state: {
-    "totalSupply":            <currentTotalSupply>,
-    "currentProtocol":        <currentProtocol>,
-    "currentMarket":          <currentMarket>,
-    "receiptTokenAddress":    <receiptTokenAddress>,
-    "totalVaultUsd":          <totalVaultUsd>,
-    "current_apy":            <currentApyBps>
+    "total_supply":          <currentTotalSupply>,
+    "current_protocol":      <currentProtocol>,
+    "current_market":        <currentMarket>,
+    "receipt_token_address": <receiptTokenAddress>,
+    "total_vault_usd":       <total_vault_usd>,
+    "current_apy_bps":       <currentApyBps>
   }
 }
 ```
@@ -271,14 +276,16 @@ The tool returns `{ ok: true }` on success. On error, log the error string and c
   "current_market_tag":      "clean|anomalous|new|null",
   "current_market_anomalous": <boolean>,
   "anomaly_direction":        "spike|drop|null",
+  "current_market_exit_reason": "<tvl_floor|apy_ceiling|lltv|utilization|null>",
   "anomalies":                ["<string>"]
 }
 ```
 
-`current_apy_bps` = `apyBaseBps` of the current market from `{{stage.scan_lending_markets}}.all` (not from `factor_vault_analytics`). `null` if no active position, scan stage absent, or current market not found in scan output.
+`current_apy_bps` = `apy_base_bps` of the current market from `{{stage.scan_lending_markets}}.all` (not from `factor_vault_analytics`). `null` if no active position, scan stage absent, or current market not found in scan output.
 `current_market_eligible` = `null` when scan stage output is absent or vault is idle; `true`/`false` otherwise.
-`current_market_anomalous` = `true` when `|currentApyBps − previousCurrentApy| > 300 bps` and both values are non-null; `false` on first cycle or when either value is null.
+`current_market_anomalous` = `true` when `|currentApyBps − previousCurrentApy| > anomalySpikeBps` and both values are non-null; `false` on first cycle or when either value is null.
 `anomaly_direction` = `"spike"` when current APY is higher than previous, `"drop"` when lower, `null` when not anomalous or first cycle.
+`current_market_exit_reason` = the first gate the current market failed in `scan_lending_markets` this cycle. `null` when the market is still eligible, vault is idle, scan stage is absent, or the failure reason could not be matched.
 `anomalies` = `[]` when no anomalies are detected.
 
 The orchestrator reads this as `{{previous}}` for downstream stages. On any unrecoverable error, emit `{ "error": "<description>", "anomalies": [] }`.

@@ -1,3 +1,5 @@
+{/* blocks/configuration/setup_openocean_swap.md — v1.0.0 */}
+
 ## Block: setup_openocean_swap
 
 Ensures a Factor vault has the **OpenOcean** DEX aggregator adapter registered and ready for swaps. Designed to run at the start of every cycle as part of the protocol configuration chain. Idempotent — in steady state the pre-flight check confirms the adapter is registered and exits immediately with a single `factor_get_vault_info` call and no transactions.
@@ -20,7 +22,7 @@ OpenOcean requires **only an adapter registration** — no receipt token, no mar
 
 Call `factor_get_vault_info` with `vaultAddress = {{vault_address}}`.
 
-- If `managerAdapters` already contains an entry whose name includes `"openocean"` → **STOP immediately. Do not call `factor_get_address_book`, `factor_add_adapter`, or any other tool.** This is the expected outcome on every cycle after the first setup run. Emit `{"configured":true,"skipped":true,"reason":"already_configured","protocol":"openocean"}` as the final output and exit.
+- If `adapters.manager` already contains an entry whose name includes `"openocean"` → **STOP immediately. Do not call `factor_get_address_book`, `factor_add_adapter`, or any other tool.** This is the expected outcome on every cycle after the first setup run. Emit `{"configured":true,"skipped":true,"reason":"already_configured","protocol":"openocean"}` as the final output and exit.
 - Otherwise, proceed to Step 1.
 
 ---
@@ -41,7 +43,7 @@ factor_add_adapter({
   vaultAddress: "{{vault_address}}",
   adapterAddress: <addr_openocean_adapter>
 })
-→ sign_and_send → factor_get_transaction_status (must be 0x1)
+→ sign_and_send → factor_get_transaction_status (must be "success"; retry once on "pending")
 ```
 
 If the transaction reverts with `Already exists`, the adapter is already present — treat as a no-op.
@@ -49,7 +51,7 @@ If the transaction reverts with `Already exists`, the adapter is already present
 ### Step 3 — Verify
 
 Call `factor_get_vault_info` with `vaultAddress = {{vault_address}}` and confirm:
-- `managerAdapters` contains an entry whose name includes `"openocean"`.
+- `adapters.manager` contains an entry whose name includes `"openocean"`.
 
 If present, the vault is correctly configured for swaps.
 
@@ -76,12 +78,12 @@ If present, the vault is correctly configured for swaps.
 1. **`factor_add_adapter` takes `adapterAddress` only** — resolve `factor_openocean_adapter_pro` from `factor_get_address_book` first (Step 1). There is no `adapterType` field on this tool.
 2. **Do NOT register any receipt token** — OpenOcean is a router, not a custodian. Tokens received from swaps land in the vault directly and are already covered by the vault's existing asset registry.
 3. **Do NOT call `addMarketToAssetAndDebt`** — OpenOcean has no market concept.
-4. Every `sign_and_send` call **must** be immediately followed by `factor_get_transaction_status`. **A transaction can be confirmed (included in a block) and still fail on-chain.** `status = "0x0"` means an EVM revert — the tx was mined but its execution reverted. Only `status = "0x1"` means the operation succeeded. Do not proceed past any step until you observe `"0x1"`.
-5. On any non-`0x1` status (including `"0x0"` EVM revert): call `factor_decode_error` once, set `errors`, emit final JSON, and **STOP** — do not retry.
+4. Every `sign_and_send` call **must** be immediately followed by `factor_get_transaction_status`. The tool returns `"success"`, `"pending"`, or `"failed"` — never hex. **A transaction can be confirmed on-chain and still fail (EVM revert).** Only `status == "success"` means the operation succeeded. On `"pending"`: retry `factor_get_transaction_status` once. If the retry returns `"pending"` or `"failed"`, treat as failure. Do not proceed past any step until you observe `"success"`.
+5. On `"failed"` or a second `"pending"`: call `factor_decode_error` once, set `errors`, emit final JSON, and **STOP** — do not retry.
 
 ## Note on token registration
 
-OpenOcean swaps require **both the input token and the output token** to be in the vault's `assets[]` registry:
+OpenOcean swaps require **both the input token and the output token** to be in the vault's `assets.supported[]` registry:
 - The **input token** must be present so the adapter can read the vault's balance before the swap.
 - The **output token** must be present so vault accounting captures the tokens received from the swap.
 

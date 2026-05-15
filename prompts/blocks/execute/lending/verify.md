@@ -1,4 +1,6 @@
-# block: execution/lending/balanced/verify
+{/* blocks/execute/lending/verify.md — v1.0.0 */}
+
+# block: execute/lending/balanced/verify
 
 **Responsibility:** Independent post-execution sanity check. Read the execute stage's output from `{{previous}}`, re-fetch live vault state via `factor_vault_analytics`, and confirm the live position is consistent with what execute reported. Thin check only — the goal is to catch hallucinated successes, not to re-verify every detail. Emits `verified` boolean and the user-facing `action_summary`.
 
@@ -15,7 +17,6 @@ Read exclusively from `{{previous}}` (the execute stage output). Required fields
 | `decision` | `string` | Context for summary |
 | `to_protocol` | `string\|null` | Expected live protocol after supply |
 | `to_market` | `string\|null` | Expected live market after supply |
-| `from_protocol` | `string\|null` | Expected withdrawn protocol |
 | `action_summary` | `string` | Passed through as `summary` on success |
 
 Also reads `vaultAddress` from the system prompt.
@@ -26,7 +27,7 @@ Also reads `vaultAddress` from the system prompt.
 
 ## ⛔ Hard rules
 
-1. **If `previous.executed == false`, emit output immediately — no tool calls.** This covers HOLD, HOLD-IDLE, HOLD-IDLE-FLAG, FLAG_ANOMALY, and SAFETY_HALT paths.
+1. **If `previous.executed == false`, emit output immediately — no tool calls.** This covers HOLD, HOLD-IDLE, HOLD-IDLE-FLAG, and SAFETY_HALT paths.
 2. **One `factor_vault_analytics` call only.** Do not call any write tools, signing tools, or cycle state tools.
 3. **`verified: true` means live state is consistent with `previous.status`.** It does not mean the execution was optimal or that every field matches exactly — only that the vault is not in a state that contradicts what execute reported.
 4. **On any `factor_vault_analytics` error**, emit `verified: false` with `summary` explaining the tool failure. Do not retry.
@@ -59,6 +60,7 @@ Derive from the response (same logic as execute.md Step 1):
 | `live_market` | Aave: `null`. Morpho: `lending.morpho[0].id`. Compound: cToken `.address` from `positions[]`. |
 | `live_idle_usdc` | `stats.totalIdleUsd` |
 | `positions[]` | All position entries — filter by `type == "credit" \| "supply"` to check for active lending positions |
+| `total_vault_usd` | `tvlUsd` |
 
 ---
 
@@ -71,21 +73,21 @@ Apply the check for `previous.status` and `previous.decision`:
 Assert ALL of:
 1. `live_protocol == previous.to_protocol`
 2. `live_market == previous.to_market`
-3. `live_idle_usdc == 0` — funds fully deployed, no USDC left idle
+3. `live_idle_usdc ≤ dustThreshold` where `dustThreshold = min(5, max(0.01, total_vault_usd × 0.0005))` — funds considered fully deployed; small residuals from rounding are expected
 
 - All pass → `verified: true`
 - Protocol/market mismatch → `verified: false`, summary: `⚠️ Verification failed — vault shows [live_protocol]/[live_market] but execute reported move to [to_protocol]/[to_market].`
-- Idle USDC non-zero → `verified: false`, summary: `⚠️ Verification failed — vault shows [live_idle_usdc] USDC still idle after reported REBALANCE-YIELD success.`
+- Idle USDC exceeds threshold → `verified: false`, summary: `⚠️ Verification failed — vault shows [live_idle_usdc] USDC still idle after reported REBALANCE-YIELD success (dust threshold: [dustThreshold]).`
 
 ### SUCCESS — HOLD-TOPUP
 
 Assert ALL of:
 1. `live_protocol == previous.to_protocol`
-2. `live_idle_usdc == 0` — idle USDC fully deployed
+2. `live_idle_usdc ≤ dustThreshold` where `dustThreshold = min(5, max(0.01, total_vault_usd × 0.0005))` — idle USDC considered fully deployed; small residuals from rounding are expected
 
 - All pass → `verified: true`
 - Protocol mismatch → `verified: false`, summary: `⚠️ Verification failed — vault protocol is [live_protocol], expected [to_protocol] after top-up.`
-- Idle USDC non-zero → `verified: false`, summary: `⚠️ Verification failed — vault shows [live_idle_usdc] USDC still idle after reported HOLD-TOPUP success.`
+- Idle USDC exceeds threshold → `verified: false`, summary: `⚠️ Verification failed — vault shows [live_idle_usdc] USDC still idle after reported HOLD-TOPUP success (dust threshold: [dustThreshold]).`
 
 ### SUCCESS — RISK-EXIT
 
@@ -127,4 +129,4 @@ Emit the following JSON object as the **absolute last line** of output. No prose
 }
 ```
 
-`summary` is `previous.action_summary` when `verified: true`. When `verified: false`, it is the discrepancy message from Step 3 (or the execute action_summary prefixed with the discrepancy on HOLD paths).
+`summary` is `previous.action_summary` when `verified: true`. When `verified: false`, it is the discrepancy message from Step 3.

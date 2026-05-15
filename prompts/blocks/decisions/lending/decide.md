@@ -1,3 +1,5 @@
+{/* blocks/decisions/lending/decide.md — v1.0.0 */}
+
 # block: decisions/lending/balanced/decide
 
 **Responsibility:** Pure routing — read eligible market data from `{{stage.scan_lending_markets}}` and vault position state from `{{stage.scan_position_lending}}`, apply Lending × Balanced decision logic, and emit structured routing flags for downstream execute blocks. No tool calls. No execution. No signing.
@@ -8,7 +10,7 @@
 
 | Field | Source | Type |
 |---|---|---|
-| `best_eligible` | `{{stage.scan_lending_markets}}` | `{ protocol, market, receiptToken, collateralToken, collateralSymbol, apyBase }` |
+| `best_eligible` | `{{stage.scan_lending_markets}}` | `{ protocol, market, receipt_token, collateral_token, collateral_symbol, apy_base_bps }` |
 | `current_protocol` | `{{stage.scan_position_lending}}` | `"aave" \| "compoundV3" \| "morpho" \| null` |
 | `current_market` | `{{stage.scan_position_lending}}` | `string \| null` |
 | `current_apy_bps` | `{{stage.scan_position_lending}}` | `bps \| 0 \| null` |
@@ -18,6 +20,7 @@
 | `current_market_eligible` | `{{stage.scan_position_lending}}` | `boolean \| null` |
 | `current_market_anomalous` | `{{stage.scan_position_lending}}` | `boolean` |
 | `anomaly_direction` | `{{stage.scan_position_lending}}` | `"spike" \| "drop" \| null` |
+| `current_market_exit_reason` | `{{stage.scan_position_lending}}` | `"tvl_floor" \| "apy_ceiling" \| "lltv" \| "utilization" \| null` |
 
 **No `read_cycle_state` call.** This block has no inter-cycle state. All historical position tracking is owned by `scan_position_lending`.
 
@@ -31,9 +34,9 @@ If either upstream stage output is missing or malformed, emit the error JSON def
 
 2. **Step 3 (risk exit) runs unconditionally after every Step 2 decision, without exception.** A matching risk exit condition overrides any Step 2 outcome — including HOLD, HOLD-TOPUP, and REBALANCE-YIELD. It cannot be bypassed by any other reasoning.
 
-3. **No tool calls, no signing, no execution.** This block emits routing flags only. `sign_and_send` and all write tools are forbidden.
+3. **`math_calculate` is the only permitted tool call.** No signing, no execution, no write tools, no state reads. This block emits routing flags only. `sign_and_send` and all other tools are forbidden.
 
-4. **No arithmetic.** All comparisons are ordinal. `minDeploymentThreshold` and `effectiveThreshold` are derived from the hardcoded values below using the specified formulas — do not substitute, re-derive, or approximate them.
+4. **No inline arithmetic.** All numeric operations call `math_calculate`. `minDeploymentThreshold` and `effectiveThreshold` are computed in Step 1 via `math_calculate` — do not substitute, re-derive, or approximate them.
 
 ---
 
@@ -56,8 +59,14 @@ The following values are sourced directly from `lending_balanced_rebalance_17.md
 Read these two values once. Use them throughout Steps 2 and 3.
 
 ```
-effectiveThreshold     = max(10, current_apy_bps × 0.10)     [bps]
-minDeploymentThreshold = min(5, max(0.01, total_vault_usd × 0.0005))   [USDC]
+Compute effectiveThreshold [bps]:
+math_calculate(operation: "multiply", operands: [<current_apy_bps>, 0.10], decimalPlaces: 0)  → result_1
+math_calculate(operation: "max", operands: [10, <result_1>])  → effectiveThreshold
+
+Compute minDeploymentThreshold [USDC]:
+math_calculate(operation: "multiply", operands: [<total_vault_usd>, 0.0005])  → result_2
+math_calculate(operation: "max", operands: [0.01, <result_2>])  → result_3
+math_calculate(operation: "min", operands: [5, <result_3>])  → minDeploymentThreshold
 ```
 
 ---
@@ -66,9 +75,11 @@ minDeploymentThreshold = min(5, max(0.01, total_vault_usd × 0.0005))   [USDC]
 
 Work through each path in order. Stop at the first matching path and record the decision. Do not evaluate subsequent paths.
 
+**Pre-check — ineligible current market:** If `current_protocol != null` AND `current_market_eligible == false`, skip Paths A–G entirely and proceed directly to Step 3. The current market has left the eligible set this cycle — `current_apy_bps` is null and no spread calculation is meaningful. Step 3 will determine the appropriate risk exit condition.
+
 ---
 
-### Path A — Idle vault (`current_apy_bps == 0 or null`)
+### Path A — Idle vault (`current_protocol == null`)
 
 ```
 target = best_eligible   // highest clean market from scan_lending_markets
@@ -102,7 +113,7 @@ IF best_eligible.protocol == "NONE"
 ### Path C — Active position, spread below threshold
 
 ```
-spread = best_eligible.apyBase - current_apy_bps
+math_calculate(operation: "subtract", operands: [<best_eligible.apy_base_bps>, <current_apy_bps>])  → spread
 
 IF spread < effectiveThreshold
   decision = HOLD
@@ -135,7 +146,7 @@ IF current_market_anomalous == true AND anomaly_direction == "drop"
     do_rebalance = true    // withdraw from current, supply to target
     do_withdraw  = false
     target       = best_eligible
-    display_spread = best_eligible.apyBase - current_apy_bps
+    math_calculate(operation: "subtract", operands: [<best_eligible.apy_base_bps>, <current_apy_bps>])  → display_spread
   ELSE
     decision = HOLD-IDLE-FLAG
     do_supply = do_rebalance = do_withdraw = false
@@ -155,7 +166,7 @@ do_supply      = false
 do_rebalance   = true
 do_withdraw    = false
 target         = best_eligible
-display_spread = best_eligible.apyBase - current_apy_bps
+math_calculate(operation: "subtract", operands: [<best_eligible.apy_base_bps>, <current_apy_bps>])  → display_spread
 ```
 
 → proceed to Step 3.
@@ -183,17 +194,21 @@ IF decision ∈ {HOLD, HOLD-IDLE-FLAG}
 
 ## Step 3 — Risk exit (unconditional)
 
-Evaluate both conditions in order against data already available from Steps 1 and 2. First match overrides the Step 2 decision. Market-level risk gates (size, APY cap, LLTV, utilization) are the responsibility of `scan_lending_markets` — decide does not re-check them. Their outcome is already encoded in `current_market_eligible`.
+Evaluate conditions in order against data from upstream stages. First match overrides the Step 2 decision. 
 
-| # | Condition | How to evaluate |
+**No active position** (`current_protocol == null`): skip Step 3 entirely.
+
+| # | Condition | Source |
 |---|---|---|
-| 1 | `current_market_eligible == false` | Current market has left the eligible set this cycle (failed a size, APY, LLTV, or utilization gate in `scan_lending_markets`). Read `current_market_eligible` from `{{stage.scan_position_lending}}`. |
-| 2 | `unexpected_borrow == true` | Vault holds debt it should not. Read `unexpected_borrow` from `{{stage.scan_position_lending}}`. |
+| 1 | Market size dropped below TVL floor | `current_market_eligible == false AND current_market_exit_reason == "tvl_floor"` |
+| 2 | APY exceeded ceiling | `current_market_eligible == false AND current_market_exit_reason == "apy_ceiling"` |
+| 3 | Unexpected borrow detected | `unexpected_borrow == true` |
+| 4 | Morpho LLTV or utilization breach | `current_market_eligible == false AND current_market_exit_reason ∈ {"lltv", "utilization"}` |
 
-**No active position** (`current_protocol == null`): `current_market_eligible` is `null` — condition 1 does not fire. `unexpected_borrow` cannot be true on an idle vault. Skip Step 3 entirely.
+If `current_market_eligible == false` but `current_market_exit_reason` is `null`, treat as condition 1 (conservative default).
 
 ```
-IF any condition 1–2 matches:
+IF any condition 1–4 matches:
   decision            = RISK-EXIT
   do_supply           = false
   do_rebalance        = false
@@ -220,13 +235,13 @@ Emit the following JSON object as the **absolute last line** of your output. No 
   "target_collateral_token": "<address|null>",
   "target_collateral_symbol": "<string|null>",
   "display_spread": <bps|null>,
-  "risk_exit_condition": <1|2|null>
+  "risk_exit_condition": <1|2|3|4|null>
 }
 ```
 
 `target_*` fields are populated from the selected `target` market's fields in `best_eligible`. Null when decision is HOLD, HOLD-IDLE, HOLD-IDLE-FLAG, or RISK-EXIT.
 
-`target_collateral_symbol` is Morpho-only (`collateralSymbol` from `best_eligible`). Null for Aave and Compound V3. Used by downstream configuration blocks for logging — does not affect routing.
+`target_collateral_symbol` is Morpho-only (`collateral_symbol` from `best_eligible`). Null for Aave and Compound V3. Used by downstream configuration blocks for logging — does not affect routing.
 
 On any error or missing required upstream field, emit:
 
