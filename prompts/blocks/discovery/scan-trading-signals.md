@@ -1,3 +1,5 @@
+{/* blocks/discovery/scan-trading-signals.md — v1.0.0 */}
+
 # block: discovery/scan-trading-signals
 **Responsibility:** Surface pre-computed market indicators for the trading token, maintain previous-cycle signal state for crossover detection, and emit a structured signal snapshot for downstream decision stages. No thresholds. No decisions. No execution.
 
@@ -130,7 +132,7 @@ On error, log the error string and continue to emit the final JSON — the next 
     "ema20_weekly": <number | null>,
     "atr_pct": <number | null>,
     "atr_1h_pct": <number | null>,
-    "vol_ratio": <number>,
+    "vol_ratio": <number | null>,
     "body_pct_price": <number | null>,
     "lower_wick_ratio": <number | null>,
     "is_green": <boolean | null>,

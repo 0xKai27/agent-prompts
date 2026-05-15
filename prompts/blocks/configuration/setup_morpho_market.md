@@ -1,3 +1,5 @@
+{/* blocks/configuration/setup_morpho_market.md — v1.0.0 */}
+
 ## Block: setup_morpho_market
 
 Ensures a Factor vault has both **Morpho Blue** adapters, both the collateral and loan tokens registered with Chainlink accounting, and the market registered via `addMarketToAssetAndDebt`. Designed to run at the start of every cycle as part of the protocol configuration chain. Idempotent — in steady state the pre-flight check confirms all four conditions are met and exits immediately with a single `factor_get_vault_info` call and no transactions.
@@ -45,10 +47,10 @@ If you are uncertain whether `tokens_present` is `true` or `false`, re-call `fac
 Call `factor_get_vault_info` with `vaultAddress = {{vault_address}}`.
 
 Record FOUR flags independently:
-- `morpho_adapter_missing` = `true` if `managerAdapters` does NOT contain `factor_morpho_adapter_pro`; `false` if it does
-- `market_adapter_missing` = `true` if `managerAdapters` does NOT contain `factor_morpho_market_adapter_pro`; `false` if it does
-- `collateral_missing` = `true` if `assets` does NOT include `{{collateral_asset_address}}`; `false` if it does
-- `loan_missing` = `true` if `assets` does NOT include `{{loan_asset_address}}`; `false` if it does
+- `morpho_adapter_missing` = `true` if `adapters.manager` does NOT contain `factor_morpho_adapter_pro`; `false` if it does
+- `market_adapter_missing` = `true` if `adapters.manager` does NOT contain `factor_morpho_market_adapter_pro`; `false` if it does
+- `collateral_missing` = `true` if `assets.supported` does NOT include `{{collateral_asset_address}}`; `false` if it does
+- `loan_missing` = `true` if `assets.supported` does NOT include `{{loan_asset_address}}`; `false` if it does
 
 Derive:
 - `tokens_present` = collateral AND loan are both in `assets[]`
@@ -76,7 +78,7 @@ factor_add_adapter({
   vaultAddress: "{{vault_address}}",
   adapterAddress: <addr_morpho_adapter>
 })
-→ sign_and_send → factor_get_transaction_status (must be 0x1)
+→ sign_and_send → factor_get_transaction_status (must be "success"; retry once on "pending")
 ```
 
 If the transaction reverts with `Already exists`, treat as a no-op and continue.
@@ -90,7 +92,7 @@ factor_add_adapter({
   vaultAddress: "{{vault_address}}",
   adapterAddress: <addr_market_adapter>
 })
-→ sign_and_send → factor_get_transaction_status (must be 0x1)
+→ sign_and_send → factor_get_transaction_status (must be "success"; retry once on "pending")
 ```
 
 If the transaction reverts with `Already exists`, treat as a no-op and continue.
@@ -105,7 +107,7 @@ factor_add_vault_token({
   tokenAddress: "{{collateral_asset_address}}",
   type: "asset"
 })
-→ sign_and_send → factor_get_transaction_status (must be 0x1)
+→ sign_and_send → factor_get_transaction_status (must be "success"; retry once on "pending")
 ```
 
 `accountingAddress` can be omitted — the tool auto-detects the Chainlink accounting adapter for the current chain.
@@ -118,7 +120,7 @@ factor_add_vault_token({
   tokenAddress: "{{loan_asset_address}}",
   type: "asset"
 })
-→ sign_and_send → factor_get_transaction_status (must be 0x1)
+→ sign_and_send → factor_get_transaction_status (must be "success"; retry once on "pending")
 ```
 
 `Already exists` reverts are no-ops — proceed.
@@ -138,7 +140,7 @@ factor_execute_manager({
     params: { marketId: "{{market_id}}" }
   }]
 })
-→ sign_and_send → factor_get_transaction_status (must be 0x1)
+→ sign_and_send → factor_get_transaction_status (must be "success"; retry once on "pending")
 ```
 
 If this reverts: call `factor_decode_error`, set `errors: ["add_market_revert:<decoded>"]`, emit final JSON, and STOP. Do NOT retry — a partial revert leaves no duplicate; retrying would create one.
@@ -146,10 +148,10 @@ If this reverts: call `factor_decode_error`, set `errors: ["add_market_revert:<d
 ### Step 5 — Verify
 
 Call `factor_get_vault_info` with `vaultAddress = {{vault_address}}` and confirm:
-- `managerAdapters` contains `factor_morpho_adapter_pro`.
-- `managerAdapters` contains `factor_morpho_market_adapter_pro`.
-- `assets` contains `{{collateral_asset_address}}`.
-- `assets` contains `{{loan_asset_address}}`.
+- `adapters.manager` contains `factor_morpho_adapter_pro`.
+- `adapters.manager` contains `factor_morpho_market_adapter_pro`.
+- `assets.supported` contains `{{collateral_asset_address}}`.
+- `assets.supported` contains `{{loan_asset_address}}`.
 
 If all four are present, the vault is correctly configured for this Morpho market.
 
@@ -181,5 +183,5 @@ If all four are present, the vault is correctly configured for this Morpho marke
 5. **`addMarketToAssetAndDebt` is called AT MOST ONCE per marketId per vault, ever.** The pre-flight gate (`tokens_present`) enforces this — if both tokens were already in `assets[]`, Step 4 is permanently skipped.
 6. **`factor_execute_manager` format requires a `steps` array** — the correct call is `{ steps: [{ protocol: "morpho", action: "addMarketToAssetAndDebt", params: { marketId } }] }`. Passing `action` or `params` at the top level (outside `steps`) will fail validation.
 7. **Morpho Blue has no mToken / receipt token** — do NOT attempt to look up or register a "Morpho shares token". Only the collateral and loan asset addresses are registered as vault assets.
-8. Every `sign_and_send` call **must** be immediately followed by `factor_get_transaction_status`. **A transaction can be confirmed (included in a block) and still fail on-chain.** `status = "0x0"` means an EVM revert — the tx was mined but its execution reverted. Only `status = "0x1"` means the operation succeeded. Do not proceed past any step until you observe `"0x1"`.
-9. On any non-`0x1` status (including `"0x0"` EVM revert): call `factor_decode_error` once, set `errors`, emit final JSON, and **STOP** — do not retry.
+8. Every `sign_and_send` call **must** be immediately followed by `factor_get_transaction_status`. The tool returns `"success"`, `"pending"`, or `"failed"` — never hex. **A transaction can be confirmed on-chain and still fail (EVM revert).** Only `status == "success"` means the operation succeeded. On `"pending"`: retry `factor_get_transaction_status` once. If the retry returns `"pending"` or `"failed"`, treat as failure. Do not proceed past any step until you observe `"success"`.
+9. On `"failed"` or a second `"pending"`: call `factor_decode_error` once, set `errors`, emit final JSON, and **STOP** — do not retry.

@@ -1,3 +1,5 @@
+{/* blocks/configuration/setup_compound_market.md — v1.0.0 */}
+
 ## Block: setup_compound_market
 
 Ensures a Factor vault has both **Compound V3** (Comet) adapters, the cToken, and the market registration in place and ready for supply. Designed to run at the start of every cycle as part of the protocol configuration chain. Idempotent — in steady state the pre-flight check confirms all three conditions are met and exits immediately with a single `factor_get_vault_info` call and no transactions.
@@ -10,7 +12,7 @@ Compound V3 requires **two** manager adapters:
 - `factor_compound_v3_adapter_pro` — handles supply and withdraw
 - `factor_compound_v3_market_adapter_pro` — handles market registration
 
-Both must be present in `managerAdapters` before any supply will succeed.
+Both must be present in `adapters.manager` before any supply will succeed.
 
 ---
 
@@ -31,9 +33,9 @@ Both must be present in `managerAdapters` before any supply will succeed.
 Call `factor_get_vault_info` with `vaultAddress = {{vault_address}}`.
 
 Record three flags independently:
-- `adapter_pro_missing` = `true` if `managerAdapters` does NOT contain `factor_compound_v3_adapter_pro`; `false` if it does
-- `market_adapter_missing` = `true` if `managerAdapters` does NOT contain `factor_compound_v3_market_adapter_pro`; `false` if it does
-- `ctoken_missing` = `true` if `assets` does NOT include `{{c_token_address}}`; `false` if it does
+- `adapter_pro_missing` = `true` if `adapters.manager` does NOT contain `factor_compound_v3_adapter_pro`; `false` if it does
+- `market_adapter_missing` = `true` if `adapters.manager` does NOT contain `factor_compound_v3_market_adapter_pro`; `false` if it does
+- `ctoken_missing` = `true` if `assets.supported` does NOT include `{{c_token_address}}`; `false` if it does
 
 If **all three conditions are already satisfied** (both adapters present AND cToken registered) → **STOP immediately. Do not call `factor_get_address_book`, `factor_add_adapter`, `factor_add_vault_token`, `factor_execute_manager`, or any other tool.** This is the expected outcome on every cycle after the first setup run. Emit `{"configured":true,"skipped":true,"reason":"already_configured","protocol":"compound","asset":"{{asset_symbol}}"}` as the final output and exit.
 
@@ -58,7 +60,7 @@ factor_add_adapter({
   vaultAddress: "{{vault_address}}",
   adapterAddress: <addr_supply_adapter>
 })
-→ sign_and_send → factor_get_transaction_status (must be 0x1)
+→ sign_and_send → factor_get_transaction_status (must be "success"; retry once on "pending")
 ```
 
 If the transaction reverts with `Already exists`, treat as a no-op and continue.
@@ -72,7 +74,7 @@ factor_add_adapter({
   vaultAddress: "{{vault_address}}",
   adapterAddress: <addr_market_adapter>
 })
-→ sign_and_send → factor_get_transaction_status (must be 0x1)
+→ sign_and_send → factor_get_transaction_status (must be "success"; retry once on "pending")
 ```
 
 If the transaction reverts with `Already exists`, treat as a no-op and continue.
@@ -85,7 +87,7 @@ factor_add_vault_token({
   tokenAddress: "{{c_token_address}}",
   type: "asset"
 })
-→ sign_and_send → factor_get_transaction_status (must be 0x1)
+→ sign_and_send → factor_get_transaction_status (must be "success"; retry once on "pending")
 ```
 
 If the transaction reverts with `Already exists`, treat as a no-op and continue.
@@ -106,15 +108,15 @@ factor_execute_manager({
     }
   }]
 })
-→ sign_and_send → factor_get_transaction_status (must be 0x1)
+→ sign_and_send → factor_get_transaction_status (must be "success"; retry once on "pending")
 ```
 
 ### Step 6 — Verify
 
 Call `factor_get_vault_info` with `vaultAddress = {{vault_address}}` and confirm:
-- `managerAdapters` contains `factor_compound_v3_adapter_pro`.
-- `managerAdapters` contains `factor_compound_v3_market_adapter_pro`.
-- `assets` contains `{{c_token_address}}`.
+- `adapters.manager` contains `factor_compound_v3_adapter_pro`.
+- `adapters.manager` contains `factor_compound_v3_market_adapter_pro`.
+- `assets.supported` contains `{{c_token_address}}`.
 
 If all three are present, the vault is correctly configured for Compound V3.
 
@@ -140,8 +142,8 @@ If all three are present, the vault is correctly configured for Compound V3.
 ## Hard rules
 
 1. **`factor_add_adapter` takes `adapterAddress` only** — the schema accepts `vaultAddress` + `adapterAddress` and nothing else. There is no `adapterType` field and no `marketAddress` field on this tool. Resolve the adapter address from `factor_get_address_book` first (Step 1); do not hardcode or guess it.
-2. **Both adapters are required and each is a separate transaction** — `factor_compound_v3_adapter_pro` and `factor_compound_v3_market_adapter_pro` must both be in `managerAdapters`. Registering only one will cause supply to fail silently on-chain.
+2. **Both adapters are required and each is a separate transaction** — `factor_compound_v3_adapter_pro` and `factor_compound_v3_market_adapter_pro` must both be in `adapters.manager`. Registering only one will cause supply to fail silently on-chain.
 3. **`factor_execute_manager` with `addMarketToAsset` is mandatory every run** — without Step 5, `factor_lend_supply` broadcasts but reverts silently. The call is idempotent; always execute it regardless of whether the other steps were skipped.
 4. **`addMarketToAsset` (Compound) ≠ `addMarketToAssetAndDebt` (Morpho)** — do not confuse these. The Compound action is idempotent and safe to call unconditionally. The Morpho `addMarketToAssetAndDebt` is NOT — calling it twice causes phantom asset registration. Never substitute one for the other.
-5. Every `sign_and_send` call **must** be immediately followed by `factor_get_transaction_status`. **A transaction can be confirmed (included in a block) and still fail on-chain.** `status = "0x0"` means an EVM revert — the tx was mined but its execution reverted. Only `status = "0x1"` means the operation succeeded. Do not proceed past any step until you observe `"0x1"`.
-6. On any non-`0x1` status (including `"0x0"` EVM revert): call `factor_decode_error` once, set `errors`, emit final JSON, and **STOP** — do not retry or attempt recovery.
+5. Every `sign_and_send` call **must** be immediately followed by `factor_get_transaction_status`. The tool returns `"success"`, `"pending"`, or `"failed"` — never hex. **A transaction can be confirmed on-chain and still fail (EVM revert).** Only `status == "success"` means the operation succeeded. On `"pending"`: retry `factor_get_transaction_status` once. If the retry returns `"pending"` or `"failed"`, treat as failure. Do not proceed past any step until you observe `"success"`.
+6. On `"failed"` or a second `"pending"`: call `factor_decode_error` once, set `errors`, emit final JSON, and **STOP** — do not retry or attempt recovery.
