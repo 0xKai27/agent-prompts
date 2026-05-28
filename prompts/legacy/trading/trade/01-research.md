@@ -6,7 +6,7 @@ Your job: emit a flat JSON with the trade signals + vault state. **Use the `trad
 
 1. **Call `trade_signals({symbol: "<marketSymbol>"})` ONCE.** Resolve wrapped/bridge tokens to the underlying Binance market before calling the tool: `WETH` / `ETH` / `cbETH` → `ETHUSDT`; `WBTC` / `BTC` / `cbBTC` → `BTCUSDT`. Never call invalid markets like `CBBTCUSDT` or `WETHUSDT`. The tool returns a flat JSON with every signal listed in the output schema below.
 2. Read **Current Holdings** + **Open Positions** blocks from your system prompt.
-3. Combine the two — emit a single-line JSON merging the tool output with the vault-state fields.
+3. Combine the two — emit a single-line JSON merging the tool output with the vault-state fields. For `open_position_targets`: copy the `targets[]` array verbatim from the Open Positions block in the system prompt (do NOT recompute or reorder). If the Open Positions block shows no targets, emit `"open_position_targets": []`.
 
 If `trade_signals` errors, retry **once**. If it errors again, output `{"unavailable": true, "reason": "trade_signals tool unavailable"}` on a single line and stop. Do NOT fall back to manual computation.
 
@@ -50,9 +50,9 @@ The fields under "from trade_signals" are copied verbatim from the tool response
   "vault_position_token_usd": <number>,
   "vault_position_token_amount": <number or 0 if no position>,
   "open_position_cost_basis_usd": <number or null if no position>,
-  "open_position_scalp_target_usd": <number or null>,
-  "open_position_tp_target_usd": <number or null>,
-  "open_position_stop_loss_usd": <number or null>
+  "open_position_targets": [
+    { "label": "<string>", "priceUsd": <number>, "sellPercent": <number> }
+  ]
 }
 ```
 

@@ -169,6 +169,33 @@ HOLD — when:
 
    Then call `factor_get_transaction_status` with the returned tx hash to verify it actually settled. Do not claim success in your summary if the receipt status is reverted.
 
+   **Step 6c — After BUY confirms, persist the exit plan via `set_position_targets`.**
+   Use the entry price (`price` from the Market Indicators block) and `atr_pct` to derive ATR-based targets. Aggressive floor: scalp +2.5% gross, TP +5.5% gross, stop −3.5% gross (widen stop to `−atr_pct` if ATR > 3.5%).
+   ```
+   set_position_targets({
+     vaultId: <your vault address>,
+     tradingTokenAddress: <trading token address>,
+     targets: [
+       { "label": "scalp",      "priceUsd": price × (1 + max(atr_pct×0.5, 2.5)/100), "sellPercent": 33  },
+       { "label": "takeProfit", "priceUsd": price × (1 + max(atr_pct×1.5, 5.5)/100), "sellPercent": 100 },
+       { "label": "stopLoss",   "priceUsd": price × (1 − max(atr_pct×1.0, 3.5)/100), "sellPercent": 100 }
+     ]
+   })
+   ```
+   After a **full SELL** (stop / tp / trailing / reversal / timeout): clear the exit plan:
+   `set_position_targets({ vaultId: ..., tradingTokenAddress: ..., targets: [] })`
+   After a **partial scalp** (step 1 or 2): remove the scalp tier, keep TP and stop at their original prices:
+   ```
+   set_position_targets({
+     vaultId: ..., tradingTokenAddress: ...,
+     targets: [
+       { "label": "takeProfit", "priceUsd": <tp_usd>,   "sellPercent": 100 },
+       { "label": "stopLoss",   "priceUsd": <stop_usd>, "sellPercent": 100 }
+     ]
+   })
+   ```
+   (Read tp_usd and stop_usd from the Locked Exit Plan block — those are the originally persisted prices.)
+
 7. Report — your conclusion MUST include ALL of these:
    - **Decision**: BUY / SELL / HOLD
    - **Entry/exit path**: which path (B or D for entries; quick-scalp / full-TP / trailing / stop / reversal / timeout for exits) and why

@@ -18,13 +18,18 @@ Risk thresholds come from `strategy.config` in the system prompt: `entryRsiThres
 
 Test exits in priority order. First match wins.
 
+Define target lookups from the research output:
+- `stopTarget = previous.open_position_targets.find(t => t.label === "stopLoss")`
+- `tpTarget = previous.open_position_targets.find(t => t.label === "takeProfit")`
+- `scalpTarget = previous.open_position_targets.find(t => t.label === "scalp")`
+
 **Min-hold protection (counter-trend):** When `previous.open_position_entry_path ∈ {"B", "E"}` AND `previous.open_position_ticks_since_buy < 2`, the only exits allowed are `stop` (safety) and `tp` (full take-profit). Skip `scalp`, `trailing`, and `reversal` — counter-trend entries need at least 2 tick bars to let the rebound develop. If neither stop nor tp fires within this window → `hold`.
 
-**Stop-loss:** `previous.price <= previous.open_position_stop_loss_usd` → `sell`, `path: "stop"`, full close.
+**Stop-loss:** `stopTarget` is defined AND `previous.price <= stopTarget.priceUsd` → `sell`, `path: "stop"`, full close.
 
-**Full take-profit:** `previous.price >= previous.open_position_tp_target_usd` → `sell`, `path: "tp"`, full close.
+**Full take-profit:** `tpTarget` is defined AND `previous.price >= tpTarget.priceUsd` → `sell`, `path: "tp"`, full close.
 
-**Quick scalp (33%):** `previous.price >= previous.open_position_scalp_target_usd` AND (`previous.rsi_1h >= scalpRsiThreshold` OR `previous.rsi_15m >= scalpRsiThreshold + 5`) → `sell`, `path: "scalp"`, `scalp_pct: 33`.
+**Quick scalp (33%):** `scalpTarget` is defined AND `previous.price >= scalpTarget.priceUsd` AND (`previous.rsi_1h >= scalpRsiThreshold` OR `previous.rsi_15m >= scalpRsiThreshold + 5`) → `sell`, `path: "scalp"`, `scalp_pct: 33`.
 
 **Trailing exit:** the orchestrator does not have a way to compute "NET PnL" without arithmetic, so this path requires `previous.tf_15m` flipping to `SELL` AND `previous.macd_15m_histogram < 0` AND `previous.price > previous.open_position_cost_basis_usd / previous.vault_position_token_amount`. (The position is up vs cost basis AND momentum is rolling over.) → `sell`, `path: "trailing"`.
 

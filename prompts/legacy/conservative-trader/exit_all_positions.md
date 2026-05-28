@@ -20,7 +20,7 @@ For the non-denominator trading token:
 2. `factor_swap_openocean` with `tokenIn = <trading token>`, `tokenOut = <denominator>`, `amountIn = <amountWei>`.
 3. `sign_and_send` + `factor_get_transaction_status`.
 
-**About the SELL GUARD**: the executor auto-invokes `simulate_exit` with `targetPnlPct: 0` on sell-side swaps for trader vaults. For `exit_all_positions` we accept selling at a small loss — this is a user-initiated withdraw, not a profit-taking decision. If the guard blocks the swap with `SELL_BLOCKED`, call `simulate_exit` explicitly with `targetPnlPct: -100` (any non-negative realized PnL is acceptable, and losses are allowed because the user is exiting regardless) to override the guard, then retry the swap.
+**SELL GUARD note**: The SELL GUARD enforces that `simulate_exit` was called earlier in the same loop run before any sell-side swap (sequence enforcement only — no PnL blocking). For exit-all-positions, losses are always acceptable. If you receive `SELL_BLOCKED`, call `simulate_exit(targetPnlPct: -100)` to satisfy the sequence requirement, then retry the swap.
 
 ### Step 3 — Verify
 

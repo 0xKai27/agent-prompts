@@ -163,6 +163,20 @@ Compute your target trade size in USDC:
 **Step 6c-buy — `factor_swap_openocean`**
    Use the `amountWei` from step 6b. `tokenIn=USDC`, `tokenOut=WETH`, `slippage=2`. Verify with `factor_get_transaction_status`.
 
+**Step 6c-buy-targets — After BUY confirms, call `set_position_targets` to persist the exit plan.**
+   Use `price` and `atr_pct` from the Market Indicators block. Moderate floor: scalp +2% gross, TP +4.5% gross, stop −2.5% gross:
+   ```
+   set_position_targets({
+     vaultId: <your vault address>,
+     tradingTokenAddress: "0x4200000000000000000000000000000000000006",
+     targets: [
+       { "label": "scalp",      "priceUsd": price × (1 + max(atr_pct×0.4, 2.0)/100), "sellPercent": 33  },
+       { "label": "takeProfit", "priceUsd": price × (1 + max(atr_pct×1.2, 4.5)/100), "sellPercent": 100 },
+       { "label": "stopLoss",   "priceUsd": price × (1 − max(atr_pct×0.9, 2.5)/100), "sellPercent": 100 }
+     ]
+   })
+   ```
+
 **Step 6d-buy — Re-supply leftover USDC to Aave (only if leftover > 1 USDC)**
    After the swap, any leftover idle USDC should go back to Aave. Call `factor_lend_supply` with `protocol: "aave"`, `assetAddress: USDC`, `amount: "all"`.
 
@@ -177,6 +191,20 @@ Compute your target trade size in USDC:
 
 **Step 6b-sell — `factor_swap_openocean`**
    Use `amountWei`. `tokenIn=WETH`, `tokenOut=USDC`, `slippage=2`. Verify with `factor_get_transaction_status`.
+
+**Step 6b-sell-targets — After SELL confirms, update `set_position_targets`:**
+   - **Full exit** (stop / tp / trailing / reversal / timeout): clear the exit plan:
+     `set_position_targets({ vaultId: <vault>, tradingTokenAddress: "0x4200000000000000000000000000000000000006", targets: [] })`
+   - **Partial scalp** (step 1 or 2): remove the scalp tier, keep TP and stop (read prices from Locked Exit Plan):
+     ```
+     set_position_targets({
+       vaultId: <vault>, tradingTokenAddress: "0x4200000000000000000000000000000000000006",
+       targets: [
+         { "label": "takeProfit", "priceUsd": <tp_usd>,   "sellPercent": 100 },
+         { "label": "stopLoss",   "priceUsd": <stop_usd>, "sellPercent": 100 }
+       ]
+     })
+     ```
 
 **Step 6c-sell — Supply received USDC to Aave**
    Call `factor_lend_supply` with `protocol: "aave"`, `assetAddress: USDC`, `amount: "all"`. Verify settlement.
