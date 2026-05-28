@@ -196,21 +196,6 @@ Compute your target trade size in USDC:
    Use the `amountWei` from step 6b. `tokenIn=USDC`, `tokenOut=WETH`, `slippage=1`.
    Verify with `factor_get_transaction_status`.
 
-**Step 6c-buy-targets — After BUY confirms, call `set_position_targets` to persist the exit plan.**
-   Use `scalpTargetPct=4, tpTargetPct=6` (consistent with `simulate_enter`) and ATR for the stop (floor −3.5%):
-   ```
-   set_position_targets({
-     vaultId: <your vault address>,
-     tradingTokenAddress: "0x4200000000000000000000000000000000000006",
-     targets: [
-       { "label": "scalp",      "priceUsd": price × 1.04,                       "sellPercent": 33  },
-       { "label": "takeProfit", "priceUsd": price × 1.06,                       "sellPercent": 100 },
-       { "label": "stopLoss",   "priceUsd": price × (1 − max(atr_pct, 3.5)/100), "sellPercent": 100 }
-     ]
-   })
-   ```
-   where `price` and `atr_pct` come from the Market Indicators block.
-
 **Step 6d-buy — Re-supply leftover USDC to Aave (only if leftover > 1 USDC)**
    After the swap, any leftover idle USDC (the portion you withdrew but didn't actually swap, plus any originally-idle USDC you didn't touch) should go back to Aave to keep earning. Call `factor_lend_supply` with `protocol: "aave"`, `assetAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"`, `amount: "all"`. This single call sweeps every USDC dust back into the lending position.
 
@@ -226,20 +211,6 @@ Compute your target trade size in USDC:
 **Step 6b-sell — `factor_swap_openocean`**
    Use `amountWei`. `tokenIn=WETH`, `tokenOut=USDC`, `slippage=1`.
    Verify with `factor_get_transaction_status`.
-
-**Step 6b-sell-targets — After SELL confirms, update `set_position_targets`:**
-   - **Full exit** (stop / tp / trailing / reversal / timeout): clear the exit plan:
-     `set_position_targets({ vaultId: <vault>, tradingTokenAddress: "0x4200000000000000000000000000000000000006", targets: [] })`
-   - **Partial scalp** (step 1 or 2 of the 33/50/100 ladder): remove the scalp tier, keep TP and stop (read prices from the Locked Exit Plan block):
-     ```
-     set_position_targets({
-       vaultId: <vault>, tradingTokenAddress: "0x4200000000000000000000000000000000000006",
-       targets: [
-         { "label": "takeProfit", "priceUsd": <tp_usd>,   "sellPercent": 100 },
-         { "label": "stopLoss",   "priceUsd": <stop_usd>, "sellPercent": 100 }
-       ]
-     })
-     ```
 
 **Step 6c-sell — Supply received USDC to Aave**
    The freshly-received USDC must not sit idle. Call `factor_lend_supply` with `protocol: "aave"`, `assetAddress: USDC`, `amount: "all"` to park the entire idle balance into Aave V3. Verify with `factor_get_transaction_status`.

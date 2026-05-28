@@ -26,7 +26,7 @@ If the vault holds WETH (or any non-denominator):
 2. `factor_swap_openocean` to the denominator.
 3. `sign_and_send` + verify.
 
-**SELL GUARD note**: The SELL GUARD enforces that `simulate_exit` was called earlier in the same loop run before any sell-side swap (sequence enforcement only — no PnL blocking). For exit-all-positions, losses are always acceptable. If you receive `SELL_BLOCKED`, call `simulate_exit(targetPnlPct: -100)` to satisfy the sequence requirement, then retry the swap.
+**SELL GUARD note**: sell-side swaps on trader vaults auto-invoke `simulate_exit` with `targetPnlPct: 0`. Losses are blocked by default; for exit-all-positions we accept loss. If blocked with `SELL_BLOCKED`, call `simulate_exit` with `targetPnlPct: -100` explicitly and retry.
 
 ### Step 4 — Verify
 

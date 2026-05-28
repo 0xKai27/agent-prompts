@@ -145,32 +145,6 @@ HOLD — when:
    **Step 5b — Execute the swap**
    Call `factor_swap_openocean` with `vaultAddress`, `tokenIn`, `tokenOut`, `amount=amountWei`, `slippage=1`. Then call `sign_and_send` to submit. Then `factor_get_transaction_status` to verify settlement.
 
-   **Step 5c — After BUY confirms, persist the exit plan via `set_position_targets`.**
-   Use the entry price and `atr_pct` from the Market Indicators block. Conservative floor: scalp +3% gross, TP +5.5% gross, stop −4% gross (widen to `−atr_pct × 1.1` if ATR > 3.6%).
-   ```
-   set_position_targets({
-     vaultId: <your vault address>,
-     tradingTokenAddress: <trading token address>,
-     targets: [
-       { "label": "scalp",      "priceUsd": price × (1 + max(atr_pct×0.6, 3.0)/100), "sellPercent": 33  },
-       { "label": "takeProfit", "priceUsd": price × (1 + max(atr_pct×1.5, 5.5)/100), "sellPercent": 100 },
-       { "label": "stopLoss",   "priceUsd": price × (1 − max(atr_pct×1.1, 4.0)/100), "sellPercent": 100 }
-     ]
-   })
-   ```
-   After a **full SELL** (stop / tp / trailing / reversal / timeout): clear the exit plan:
-   `set_position_targets({ vaultId: ..., tradingTokenAddress: ..., targets: [] })`
-   After a **partial scalp** (step 1 or 2): remove the scalp tier, keep TP and stop (read prices from the Locked Exit Plan block):
-   ```
-   set_position_targets({
-     vaultId: ..., tradingTokenAddress: ...,
-     targets: [
-       { "label": "takeProfit", "priceUsd": <tp_usd>,   "sellPercent": 100 },
-       { "label": "stopLoss",   "priceUsd": <stop_usd>, "sellPercent": 100 }
-     ]
-   })
-   ```
-
 6. **Report** — your conclusion MUST include ALL of these:
    - **Decision**: BUY / SELL / HOLD
    - **Entry/exit path**: A/B/D for entries; quick-scalp / full-TP / trailing / stop / reversal / timeout for exits
